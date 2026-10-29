@@ -5,7 +5,9 @@
 **Status: alpha.** The features below work and have been tested live on Windows 11, but expect
 rough edges; see [Known issues](#known-issues). Download: [v0.1.0-alpha](https://github.com/Jiigsi/corral/releases/tag/v0.1.0-alpha).
 
-![Two Corrals and a Folder Gate](assets/screenshots/corrals.png)
+![Demo: drawing and naming a Corral, dragging icons in, browsing a Folder Gate, folding, Settings](assets/screenshots/corral-demo.gif)
+
+57-second demo with sample files ([MP4](https://github.com/Jiigsi/corral/releases/download/v0.1.0-alpha/corral-demo.mp4), [how it was recorded](docs/showcase/demo-script.md)).
 
 Corral keeps the desktop tidy with a set of building blocks you arrange yourself:
 
@@ -24,6 +26,8 @@ reference items on your desktop. Dropping files onto a Folder Gate is an ordinar
 into that folder.
 
 ## More screenshots
+
+![Two Corrals and a Folder Gate](assets/screenshots/corrals.png)
 
 | | |
 | --- | --- |
@@ -99,6 +103,8 @@ desktop. Start it with `--desktop` to organise the real desktop.
 ## Known issues
 
 - List and Details views are not available yet; corrals show icons only.
+- The Welcome page in Settings says to click a Corral's title to rename it, but that does not start
+  a rename. Use **Rename Corral** in the Corral's menu (☰) instead.
 - Desktop icons that are not in a corral stay visible through a Corral or Gate placed on top
   of them.
 - In a Folder Gate, **New > Folder** creates the folder but does not start renaming it.

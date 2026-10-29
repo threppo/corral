@@ -35,6 +35,16 @@ and a scratch settings file, not real desktop items or settings.
   from the same source as `72d75fc`. The Personalization page was left out because its preview
   shows the real wallpaper.
 
+## Demo recording (29 October 2026)
+
+Driven by Claude Code with the same guarded driver, on the v0.1.0-alpha `corral.exe` (`72d75fc`),
+in preview mode with sample files and blur off. Every step was rehearsed first and checked with
+screenshots, then recorded: drawing and naming a Corral, dragging four files in, resizing, opening
+a folder inside a Folder Gate and going back up, folding and unfolding, and three Settings pages.
+All of them behaved as expected, with one exception: the rehearsal showed that clicking a Corral's
+title does not start a rename, although the Settings Welcome page says it does. Renaming works
+through the Corral menu. This is listed under Known issues; the code was not changed.
+
 ## Historical: live tests driven by the lead agent (private history)
 
 **29 October 2026, Folder Gates pass.** Claude Code drove a running Corral with the guarded

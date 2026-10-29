@@ -3,8 +3,16 @@
 A short screen recording of Corral's preview window with throwaway sample files. Nothing on the
 real desktop is touched: the preview shows only the scratch folder.
 
-This plan has not been rehearsed yet. The steps follow the current code and earlier test runs, so
-try them once before recording.
+**Recorded on 29 October 2026:** [corral-demo.mp4](https://github.com/Jiigsi/corral/releases/download/v0.1.0-alpha/corral-demo.mp4)
+(57 seconds), also shown as a GIF in the README. Claude Code rehearsed each step and then ran it
+with the guarded test driver, using the v0.1.0-alpha `corral.exe`, and recorded only Corral's own
+windows with ffmpeg. Two things changed from the first draft of this plan:
+
+- Renaming goes through the Corral menu. The rehearsal showed that clicking the title does not
+  start a rename, although the Welcome page says it does (see Known issues in the README).
+- The Settings window was opened on its own (`corral.exe --settings --settings-path <file>`)
+  instead of from a Corral's menu, so the Personalization page, which shows the real wallpaper,
+  never appears.
 
 ## Before recording
 
@@ -24,6 +32,8 @@ try them once before recording.
               rect = @{ left = 600; top = 60; right = 1020; bottom = 310 }; style = @{}; swipe_index = 0; all_pages = $false }
    $layout = @{ version = 1; next_id = 2; groups = @($gate); loose = @{}; seen_initialized = $true }
    [IO.File]::WriteAllText("$demo\layout.json", ($layout | ConvertTo-Json -Depth 6))
+   # Blur off, so the wallpaper never shows through the Corrals.
+   [IO.File]::WriteAllText("$demo\settings.json", '{ "BackgroundBlurEnabled": false }')
    ```
 
 3. Start the preview on it:
@@ -33,23 +43,24 @@ try them once before recording.
    .\corral.exe --preview --layout "$demo\layout.json" --settings-path "$demo\settings.json"
    ```
 
-4. Make the recording clean: close other windows, turn on Do Not Disturb, and use a plain
-   wallpaper (Corral's blur and Camouflage pick up colours from it).
+4. Make the recording clean: close other windows and turn on Do Not Disturb.
 5. Never drag an icon **out** of the preview window onto Explorer or the real desktop: that is an
    ordinary Windows move of the sample file.
 6. Record the preview window with the Snipping Tool (Win+Shift+R, then select the window area).
 
 ## Shot list
 
-| Time | Action | On screen / caption |
+As recorded:
+
+| Time | Action | Caption |
 | --- | --- | --- |
-| 0–5 s | Preview with the sample icons loose on the "desktop" and the Home folder Gate. | "Corral: keep desktop icons organised" |
-| 5–14 s | Drag across empty space, choose **Create Corral here**, type "Documents". | A Corral appears and gets its name. |
-| 14–22 s | Drag four sample files into it; drag its edge to resize. | Icons snap into the Corral's grid. |
-| 22–32 s | In the Home folder Gate, double-click "Recipes", then click the Up arrow in its title. | "Folder Gates: browse a folder right on the desktop" |
-| 32–38 s | Double-click the Documents title to fold it, then again to unfold. | "Fold: roll a Corral up to its title" |
-| 38–52 s | Right-click a Corral title, **Configure Corral...**; show Welcome, then Round-up, then Glance. | "Settings, with rules for new icons" |
-| 52–60 s | Close Settings; end on the tidy preview. | `github.com/Jiigsi/corral` |
+| 0–4 s | Preview with the sample icons loose on the "desktop" and the Home folder Gate. | "Corral: a desktop icon organizer for Windows" |
+| 4–14 s | Drag across empty space, choose **Create Corral here**; open the Corral's menu (☰), choose **Rename Corral**, type "Documents", Enter. | "Draw a Corral, then name it" |
+| 14–28 s | Drag four sample files into it; drag its right edge to make it wider. | "Drag icons in, resize to fit" |
+| 28–35 s | In the Home folder Gate, double-click "Recipes", then click the Up arrow in its title. | "Folder Gates: browse a folder right on the desktop" |
+| 35–41 s | Double-click the Documents title to fold it, then again to unfold. | "Fold a Corral down to its title bar" |
+| 41–52 s | Settings window: Welcome, then Round-up, then Glance. | "Settings: rules for new icons, Glance shortcuts" |
+| 52–57 s | Back on the tidy preview. | `github.com/Jiigsi/corral` |
 
 If a step does not behave as described, keep it out of the recording and note it as an issue
 rather than re-taking until it works by luck.
