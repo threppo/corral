@@ -388,7 +388,7 @@ pub fn content(page: Page) -> PageContent {
                 sec("", vec![Row::new(RowKind::Status, "Corral is on", Some("Your Corrals, Gates and shortcuts are active. Turn Corral off to show the plain desktop.")).b(Field::EnableCorral)]),
                 sec("Get started", vec![
                     Row::new(RowKind::NumberedStep, "Create a Corral", Some("Drag across an empty part of the desktop, then choose Create Corral here.")).v(Field::EnableCorral, 1),
-                    Row::new(RowKind::NumberedStep, "Name it", Some("Click the Corral title and type a name.")).v(Field::EnableCorral, 2),
+                    Row::new(RowKind::NumberedStep, "Name it", Some("Right-click the Corral title, choose Rename Corral and type a name.")).v(Field::EnableCorral, 2),
                     Row::new(RowKind::NumberedStep, "Move and resize", Some("Drag the title to move a Corral. Drag an edge to resize it.")).v(Field::EnableCorral, 3),
                 ]),
                 sec("Explore", vec![

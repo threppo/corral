@@ -43,7 +43,9 @@ screenshots, then recorded: drawing and naming a Corral, dragging four files in,
 a folder inside a Folder Gate and going back up, folding and unfolding, and three Settings pages.
 All of them behaved as expected, with one exception: the rehearsal showed that clicking a Corral's
 title does not start a rename, although the Settings Welcome page says it does. Renaming works
-through the Corral menu. This is listed under Known issues; the code was not changed.
+through the Corral menu. The recording itself used the release as it was; afterwards the Welcome
+text was corrected to point to **Rename Corral** (the release download still has the old text,
+noted under Known issues).
 
 ## Historical: live tests driven by the lead agent (private history)
 

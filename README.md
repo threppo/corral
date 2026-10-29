@@ -103,8 +103,9 @@ desktop. Start it with `--desktop` to organise the real desktop.
 ## Known issues
 
 - List and Details views are not available yet; corrals show icons only.
-- The Welcome page in Settings says to click a Corral's title to rename it, but that does not start
-  a rename. Use **Rename Corral** in the Corral's menu (☰) instead.
+- In the v0.1.0-alpha download, the Welcome page in Settings says to click a Corral's title to
+  rename it, which does not work. Right-click the title and choose **Rename Corral** instead. The
+  tip is corrected in the source.
 - Desktop icons that are not in a corral stay visible through a Corral or Gate placed on top
   of them.
 - In a Folder Gate, **New > Folder** creates the folder but does not start renaming it.

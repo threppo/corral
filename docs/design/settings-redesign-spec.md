@@ -201,8 +201,8 @@ Title "Welcome to Corral"; subtitle "Keep desktop icons in Corrals and browse fo
   are active. Turn Corral off to show the plain desktop." (Caption) + T `EnableCorral` (title becomes "Corral is
   off" when off). Turning off asks with the "Turn off Corral?" dialog (U4; MessageBox until then).
 - "Get started" card: three rows with a 24 circle number badge (accent/subtle, Body strong): "Create a Corral" /
-  "Drag across an empty part of the desktop, then choose Create Corral here."; "Name it" / "Click the Corral title and
-  type a name."; "Move and resize" / "Drag the title to move a Corral. Drag an edge to resize it."
+  "Drag across an empty part of the desktop, then choose Create Corral here."; "Name it" / "Right-click the Corral
+  title, choose Rename Corral and type a name." (a click on the title does not rename; renaming is only in the Corral menu); "Move and resize" / "Drag the title to move a Corral. Drag an edge to resize it."
 - "Explore": tiles in 2 columns, gap 12; tile = card radius 8, padding 14/12, 36 icon badge (accent/subtle, glyph
   20) + title (Body strong) + description (Caption) + chevron; click opens the page. Personalization "Colors,
   see-through and titlebars."; Camouflage "Icons that blend into the wallpaper."; Folder Gates "Browse a folder right

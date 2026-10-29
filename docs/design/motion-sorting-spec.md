@@ -236,4 +236,5 @@ sort of 200 icons, Windows "Show animations" toggled while running.
 10. Show the Caption "Windows animations are off." on the Ranges Animation row? Recommendation: yes.
 11. Lead: is `IconAnimationDisabled` the same key as the redesign's `AnimateIcons`? Assumed yes, inverted. In click-open Fold mode,
     a title click also means rename (Welcome text): recommendation, a click on a folded title only opens; rename works when open.
+    (Resolved 2026-10-29: a title click never renamed; the Welcome text now points to Rename Corral in the Corral menu.)
 12. 16 ms `WM_TIMER` now, vsync-paced later? Recommendation: timer for this version.
