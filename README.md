@@ -1,10 +1,13 @@
 # Corral
 
-**Status: alpha.** The features below work and have been tested live on Windows 11, but expect
-rough edges; see [Known issues](#known-issues).
+**A desktop icon organizer for Windows, built as a personal project with AI coding agents.**
 
-Corral is an independent desktop icon organizer for Windows. It keeps the desktop tidy
-with a set of building blocks you arrange yourself:
+**Status: alpha.** The features below work and have been tested live on Windows 11, but expect
+rough edges; see [Known issues](#known-issues). Download: [v0.1.0-alpha](https://github.com/Jiigsi/corral/releases/tag/v0.1.0-alpha).
+
+![Two Corrals and a Folder Gate](assets/screenshots/corrals.png)
+
+Corral keeps the desktop tidy with a set of building blocks you arrange yourself:
 
 - **Corrals**: movable, resizable containers that hold desktop items.
 - **Folder Gates**: a corral that shows a folder and lets you browse it without opening a window.
@@ -20,23 +23,58 @@ Arranging items in corrals and Round-up never move, rename or delete your files;
 reference items on your desktop. Dropping files onto a Folder Gate is an ordinary Windows move
 into that folder.
 
-## Screenshots
+## More screenshots
 
-Two Corrals and a Folder Gate (top right):
+| | |
+| --- | --- |
+| ![The Corral menu with its View submenu open](assets/screenshots/menu.png) | ![The Work corral folded to its title bar](assets/screenshots/fold.png) |
+| The Corral menu | A folded Corral |
+| ![Settings: Welcome page](assets/screenshots/settings-welcome.png) | ![Settings: Round-up rules](assets/screenshots/settings-round-up.png) |
+| Settings: Welcome | Settings: Round-up rules for new icons |
 
-![Two Corrals and a Folder Gate](assets/screenshots/corrals.png)
+[Settings: Glance shortcuts](assets/screenshots/settings-glance.png). All screenshots use throwaway
+sample files.
 
-The Corral menu:
+## My role and AI workflow
 
-![The Corral menu with its View submenu open](assets/screenshots/menu.png)
+I built Corral between 10 and 29 October 2026 with Claude Code and Codex, in a private repository
+(about 690 commits). This public repository starts from a single snapshot of that work, so its
+history is short on purpose.
 
-The Work corral folded to its title bar:
+**What I did**
 
-![The Work corral folded](assets/screenshots/fold.png)
+- Set the goal and the limits: a native Windows app in Rust that must never lose or move a user's
+  files without them asking.
+- Made the product decisions the agents brought to me, for example: Corral's own names for every
+  feature, the amber accent and the app icon (picked from design options), size snapping off by
+  default because resizing felt too snappy, Corrals using the desktop's icon spacing, allowing a
+  keyboard hook so Glance shortcuts work everywhere, and the GPL licence.
+- Tested by hand in the first week: preview sessions and a two-monitor session in desktop mode
+  (switching displays with Win+P, changing resolution), and reported what I saw. One of those
+  reports is the [case study](docs/showcase/case-study.md).
+- From 13 October on, approved or held every merge into the main branch, after the agents' tests
+  and reviews. I read the summaries, test results and review findings; I did not review the
+  code line by line, and I did not write the Rust code myself.
+
+**What the agents did**
+
+- **Claude Code** was the lead: it planned the work, split it into written briefs (files it may
+  touch, what "done" means, which tests to run), wrote most of the code, ran the test suite, and
+  merged branches after my OK. The final live test passes were run by Claude Code itself, with a
+  guarded driver script that refuses any click or screenshot outside Corral's own windows and
+  works only with scratch files.
+- **Codex** took briefs as a worker, each on its own branch in a separate git worktree so parallel
+  tasks never edited the same files, and did independent read-only reviews. Any change that can
+  move or delete files needed such a review before merging.
+- Every live test session was written up: what passed, what failed, which branch fixed it and
+  what was still open. The [verification record](docs/showcase/verification.md) separates what was
+  checked fresh on this code from older results, and what I tested from what the agents tested.
+
+Also here: a [45–60 second demo plan](docs/showcase/demo-script.md) using only sample files.
 
 ## Requirements
 
-- Windows 10 or Windows 11, 64-bit (x64).
+- Windows 11, 64-bit (x64). The code also targets Windows 10, but that has not been tested.
 
 ## Building
 
@@ -46,7 +84,8 @@ You need a Rust toolchain targeting `x86_64-pc-windows-gnu`.
 cargo build --release
 ```
 
-The executable is written to `target\release\corral.exe`.
+The executable is written to `target\release\corral.exe`. `cargo test` runs the unit and
+integration tests.
 
 Optionally, `scripts\build.ps1` wraps `cargo` (`-Release`, `-Test`, `-Check`). It uses a
 portable Rust toolchain if one is found at the path given by the `CORRAL_PORTABLE_RUST`
@@ -67,26 +106,7 @@ desktop. Start it with `--desktop` to organise the real desktop.
   file list copied by some programs).
 - Opening a folder with thousands of files in a Gate for the first time froze the window for
   a few seconds once in testing. It has not happened again since.
-
-## How this was built
-
-Corral was built with AI coding agents, with a person deciding what to build and approving
-every change that landed.
-
-- **Claude Code as lead.** One Claude Code session plans the work, splits it into tasks and
-  reviews and merges the results.
-- **Codex workers on written briefs.** Each task is a short written brief that lists the files
-  it may change, what "done" means and the tests to run. A Codex worker takes one brief and works
-  on its own branch in a separate git worktree, so parallel tasks never edit the same files.
-- **Guarded live testing.** A test driver script clicks, types and takes screenshots in a running
-  Corral. It refuses any click or capture that would land on a window Corral does not own, and it
-  works only with scratch files in a disposable test folder, never real desktop items.
-- **Independent reviews before merging.** Branches get a read-only review by a second agent
-  before they are merged; any change that can move or delete files always gets one. Nothing is
-  merged until the full test suite passes.
-- **Results logged per live pass.** Every live test session is written up: what passed, what
-  failed, which branch fixed it and what is still open. The known issues above come from
-  the latest pass.
+- The release `corral.exe` is not code-signed, so Windows SmartScreen may warn before the first run.
 
 ## Settings and layouts
 
