@@ -61,8 +61,9 @@ impl App {
     /// not a hover control).
     fn title_buttons_of(&self, group: &model::Group) -> group_paint::ButtonSet {
         let on = self.settings.use_titlebar_controls && !self.layout.desktop_locked;
-        let gate = self.portals.contains_key(&group.id) && group.view_flags & model::VIEW_FLAG_NO_NAVIGATION == 0;
-        group_paint::ButtonSet { menu: on, close: on, up: gate }
+        // Up only while it can act: hidden at the root (user decision 2026-10-30).
+        let up = self.portals.get(&group.id).is_some_and(|v| v.core.try_borrow().is_ok_and(|c| c.nav.can_up()));
+        group_paint::ButtonSet { menu: on, close: on, up }
     }
 
     /// The strip's layout (button rectangles, folder glyph, title run) in `strip`'s coordinates.
@@ -986,6 +987,10 @@ impl App {
             backdrop,
             pitch: grid.m.cell_h_px,
             parent,
+            resize_corners: [(geo.union.right - 1, geo.union.top), (geo.union.right - 1, geo.union.bottom - 1)].map(|corner| {
+                let zone = super::input::group_hit_zone(geo, group, corner, self.layout.desktop_locked, &[]);
+                zone.horizontal() && zone.vertical()
+            }),
             input: self.groups.iter().find(|g| g.id == id).map_or(owner, |g| g.hwnd),
             hide_mode: self.settings.scrollbar_mode == 1,
             opacity: self.qh_group_alpha(id),

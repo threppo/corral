@@ -82,7 +82,7 @@ normal Corral drawing clamped by the engine.
 ### 2.6 Layout inside the strip (pure `layout_title`)
 
 Left to right: leading cluster, title run, trailing cluster; mirror nothing (English UI).
-- Leading cluster from x = 4 DIP: menu button, then (Gates with navigation allowed) the Up button. Trailing cluster ends at
+- Leading cluster from x = 4 DIP: menu button, then (Gates showing a subfolder, navigation allowed) the Up button. Trailing cluster ends at
   W - 4 DIP: close/collapse button. Each button is `BTN_W` wide and as tall as the strip. A button group exists only when the
   Advanced toggle "Titlebar buttons on hover" is on; the room is reserved even while the buttons are not hovered, so the title
   never shifts.
@@ -197,7 +197,7 @@ outline), still not a bitmap. Size 14 DIP, regular weight, one UTF-16 code unit 
 | Expand (folded) | ChevronDown | U+E70D | click unfolds |
 | Close | ChromeClose | U+E8BB | used when the engine reports a close action (question 7) |
 | Folder (Gates) | Folder | U+E8B7 | inline before the name, not a button |
-| Up (Gates) | Up | U+E74A | navigates to the parent; shown disabled at the root, never removed |
+| Up (Gates) | Up | U+E74A | navigates to the parent; hidden at the root (user decision 2026-10-30) |
 
 States (button hit box 24 DIP wide x strip height; plate = box inset 2 DIP, radius 4), colours from the resolved text colour:
 Rest: glyph 100 %, no plate. Hover: plate 14 % alpha. Pressed (mouse down on the button, capture): plate 24 %. Disabled: glyph
@@ -218,6 +218,10 @@ shows only when the title shows (`LabelMode`).
 | 1 | Flat | Text only; the active tab has a 2 DIP bar of the text colour along the edge facing the body; hover plate 10 % |
 | 2 | Segmented | One track (strip inset 2 DIP, radius 6, 10 % fill) holding all tabs side by side; the active tab is a segment inset 2 DIP in the track (radius 4, 22 % fill) |
 | 3 | Rounded | Separate pills 4 DIP apart, height strip - 8 DIP, fully rounded; active 22 % fill, inactive 8 % fill |
+
+Rounded with room (user decisions 2026-10-29/30): one rounded title bar per tab, equal widths, 4 DIP apart, each with its
+own menu, Up and close buttons. A bar that cannot fit its buttons plus 48 DIP of title drops close, then Up, then menu;
+only when a bare 48 DIP title does not fit either does the set use the pills above.
 
 `TabsColors` on: each tab uses its own Corral's effective colour (colour-state-spec 2.3). Flat bar, Segmented segment and Rounded
 pill take that colour at alpha 255 (inactive 120) with a 1 px edge in its outline mix; the tab's text colour is `auto_text` of
@@ -266,7 +270,7 @@ DPI change re-derives `strip_px` and re-lays out from the same DIPs (nothing is 
 9. Glyph table: the six codepoints above; `pick_icon_font(available, has_glyph)` returns Fluent, else MDL2, else the vector fallback;
    a missing single codepoint in Fluent falls back for that glyph only.
 10. Buttons: hit box 24 DIP x strip height at each DPI; hover/pressed/disabled alphas 14 %, 24 %, 40 %; Up at the root is
-    disabled, not removed.
+    hidden (user decision 2026-10-30).
 11. Visibility: Always, On hover (reveal 0 draws no strip overlay/text, body fill continues), Never (strip 0), folded + Never
     shows the strip; reveal timing 120/200 ms, 0 with reduced motion.
 12. Tabs: widths clamp 48..160 DIP; shrink then scroll keeps the active tab visible; each of the four styles produces the

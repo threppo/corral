@@ -44,16 +44,31 @@ fn segments_share_full_width_and_preserve_buttons_and_title_at_all_dpis() {
 }
 
 #[test]
-fn segment_minimum_is_exact_and_narrow_width_uses_the_unchanged_pill_path() {
+fn narrow_segments_drop_close_then_up_then_menu_before_the_pill_path() {
     for dpi in DPIS {
         for count in [2, 3, 5] {
             for gate in [false, true] {
                 let m = member(dpi, gate);
-                let min = 2 * (px(CLUSTER_PAD, dpi) + px(TEXT_GAP, dpi))
-                    + (2 + gate as i32) * px(BTN_W, dpi) + px(48.0, dpi)
-                    + if gate { px(GLYPH, dpi) + px(TEXT_GAP, dpi) } else { 0 };
-                let width = min * count as i32 + px(4.0, dpi) * (count as i32 - 1);
-                assert!(tab_segments(rect(0, 0, width, metrics(dpi).title_h), dpi, &vec![m; count]).is_some());
+                let folder = if gate { px(GLYPH, dpi) + px(TEXT_GAP, dpi) } else { 0 };
+                let total = |seg: i32| seg * count as i32 + px(4.0, dpi) * (count as i32 - 1);
+                let at = |seg: i32| tab_segments(rect(0, 0, total(seg), metrics(dpi).title_h), dpi, &vec![m; count]);
+                let kept = |seg: i32| at(seg).unwrap().iter()
+                    .map(|s| (s.layout.menu.is_some(), s.layout.up.is_some(), s.layout.close.is_some())).collect::<Vec<_>>();
+                let full = 2 * (px(CLUSTER_PAD, dpi) + px(TEXT_GAP, dpi)) + (2 + gate as i32) * px(BTN_W, dpi) + px(48.0, dpi) + folder;
+                assert!(kept(full).iter().all(|k| *k == (true, gate, true)));
+                assert!(kept(full - 1).iter().all(|k| *k == (true, gate, false)), "close goes first");
+                // Both sides of every step: the narrowest bar that keeps `lead` leading buttons without close.
+                let lead_min = |lead: i32| px(CLUSTER_PAD, dpi) + lead * px(BTN_W, dpi) + px(TEXT_GAP, dpi) + px(EDGE_PAD, dpi) + px(48.0, dpi) + folder;
+                assert!(kept(lead_min(1 + gate as i32)).iter().all(|k| *k == (true, gate, false)));
+                if gate {
+                    assert!(kept(lead_min(2) - 1).iter().all(|k| *k == (true, false, false)), "then Up");
+                    assert!(kept(lead_min(1)).iter().all(|k| *k == (true, false, false)));
+                }
+                assert!(kept(lead_min(1) - 1).iter().all(|k| *k == (false, false, false)), "then the menu");
+                let bare = 2 * px(EDGE_PAD, dpi) + px(48.0, dpi) + folder;
+                assert!(kept(bare).iter().all(|k| *k == (false, false, false)), "then the menu");
+                let width = total(bare);
+                assert!(at(bare - 1).is_none());
                 let narrow = rect(0, 0, width - 1, metrics(dpi).title_h);
                 assert!(tab_segments(narrow, dpi, &vec![m; count]).is_none());
                 assert!(!crate::tabs::tab_cells(narrow, (px(32.0, dpi), width - px(32.0, dpi)),

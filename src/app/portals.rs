@@ -216,9 +216,10 @@ impl App {
 
     /// Open `name` when it is a folder a Gate shows: inside the Gate when Allow navigation is on and it is
     /// inside the root, otherwise in Explorer (folder-gate-host-spec 4.3). False for anything else (the
-    /// caller opens it as Windows does).
-    pub(super) fn gate_open(&mut self, name: &str) -> bool {
-        let Some(item) = self.items.iter().find(|i| i.gate.is_some() && i.shell.parsing_name.eq_ignore_ascii_case(name)) else { return false };
+    /// caller opens it as Windows does). `gate` is the Gate the input came from: two Gates can show the same folder.
+    pub(super) fn gate_open(&mut self, name: &str, gate: Option<u64>) -> bool {
+        let Some(item) = self.items.iter().find(|i| i.gate.is_some() && (gate.is_none() || i.gate == gate)
+            && i.shell.parsing_name.eq_ignore_ascii_case(name)) else { return false };
         if !item.shell.is_folder || item.shell.is_link { return false; }
         let Some(id) = item.gate else { return false };
         let Some(view) = self.portals.get(&id) else { return false };
@@ -602,7 +603,11 @@ impl App {
         };
         let Some(target) = target else { return };
         if portal::decide_nav(&view.core.borrow().nav, Some(&target), portal::NavOrigin::Corral, false) != portal::NavDecision::Allow { return; }
+        // Back/Forward move the cursor now, so Up's visibility changes before the browse ends: repaint so the
+        // painted strip and its hit tests stay one layout.
+        let moved = token.is_some();
         view.step = token;
+        if moved { self.render_gate_member(id); }
         self.probe_target(id, &target);
     }
 

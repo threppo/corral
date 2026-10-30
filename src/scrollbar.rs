@@ -573,6 +573,8 @@ pub struct Params {
     pub hide_mode: bool,
     /// Parent Corral bounds in screen pixels, including its titlebar.
     pub parent: [i32; 4],
+    /// The Corral resizes from its top-right / bottom-right corner (not locked, edge not docked).
+    pub resize_corners: [bool; 2],
     pub input: HWND,
 }
 #[derive(Clone, Copy, Default)]
@@ -830,6 +832,7 @@ impl Bar {
             opacity: 255,
             hide_mode: true,
             parent: [0; 4],
+            resize_corners: [false; 2],
             input: owner,
         };
         let state = Rc::new(RefCell::new(State {
@@ -1177,6 +1180,14 @@ impl State {
 fn lookup(hwnd: HWND) -> Option<Rc<RefCell<State>>> {
     STATES.with(|s| s.borrow().get(&(hwnd.0 as isize)).cloned())
 }
+/// The Corral's right resize corners beat the lane (snap::resize_zone: corner beats edge band); the bar passes
+/// those points to the Corral window under it (same thread, HTTRANSPARENT). `parent` includes the title strip.
+fn in_resize_corner(screen: (i32, i32), parent: [i32; 4], dpi: u32, corners: [bool; 2]) -> bool {
+    let corner = crate::icon_metrics::dip_to_px(crate::snap::CORNER_DIP, dpi);
+    parent[2] > parent[0] && screen.0 >= parent[2] - corner
+        && ((corners[1] && screen.1 >= parent[3] - corner) || (corners[0] && screen.1 < parent[1] + corner))
+}
+
 unsafe extern "system" fn bar_proc(
     hwnd: HWND,
     msg: u32,
@@ -1201,7 +1212,8 @@ unsafe extern "system" fn bar_proc(
     let point = (lparam.0 as i16 as i32, (lparam.0 >> 16) as i16 as i32);
     match msg {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
-        WM_NCHITTEST => return LRESULT(HTCLIENT as isize),
+        // `point` is in screen pixels here.
+        WM_NCHITTEST => return LRESULT(if in_resize_corner(point, s.p.parent, s.p.dpi, s.p.resize_corners) { HTTRANSPARENT as isize } else { HTCLIENT as isize }),
         WM_RBUTTONDOWN | WM_RBUTTONUP | WM_CONTEXTMENU | WM_RBUTTONDBLCLK => return LRESULT(0),
         WM_MOUSEMOVE => {
             s.pointer = point;
@@ -1345,6 +1357,20 @@ unsafe extern "system" fn bar_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_lane_leaves_the_corrals_right_corners_to_resizing() {
+        for dpi in [96, 120, 144, 240] {
+            let c = crate::icon_metrics::dip_to_px(crate::snap::CORNER_DIP, dpi);
+            let parent = [100, 50, 500, 450];
+            let both = [true; 2];
+            assert!(in_resize_corner((499, 449), parent, dpi, both) && in_resize_corner((500 - c, 450 - c), parent, dpi, both));
+            assert!(in_resize_corner((499, 50), parent, dpi, both));
+            assert!(!in_resize_corner((499 - c, 449), parent, dpi, both), "left of the corner");
+            assert!(!in_resize_corner((499, 449 - c), parent, dpi, both) && !in_resize_corner((499, 250), parent, dpi, both), "the lane");
+            assert!(!in_resize_corner((499, 449), parent, dpi, [true, false]) && !in_resize_corner((499, 50), parent, dpi, [false, true]),
+                "locked or docked: no corner");
+        }
+    }
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-8, "{a} != {b}");
     }

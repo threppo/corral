@@ -33,8 +33,9 @@ impl TabSegment {
     }
 }
 
-/// Equal widths, with remainder pixels distributed across the strip. No buttons are dropped:
-/// if any member cannot retain its buttons plus 48 DIP of text, use the old pill layout instead.
+/// Equal widths, with remainder pixels distributed across the strip. A bar without room for its buttons plus 48 DIP
+/// of text drops buttons in the strip order (close, Up, menu; user decision 2026-10-30); if even the bare title does
+/// not fit, use the old pill layout instead.
 pub fn tab_segments(strip: Rect, dpi: u32, members: &[SegmentInput]) -> Option<Vec<TabSegment>> {
     let n = members.len();
     if n < 2 || strip.height() <= 0 { return None }
@@ -46,11 +47,13 @@ pub fn tab_segments(strip: Rect, dpi: u32, members: &[SegmentInput]) -> Option<V
         let left = strip.left as i64 + usable * i as i64 / n as i64 + gap * i as i64;
         let right = strip.left as i64 + usable * (i + 1) as i64 / n as i64 + gap * i as i64;
         let hit = Rect::new(left as i32, strip.top, right as i32, strip.bottom);
-        let layout = layout_title(&TitleLayoutInput { strip: hit, dpi, want: member.want, folder: member.folder, text_w: member.text_w });
         let folder_space = if member.folder { px(GLYPH, dpi) + px(TEXT_GAP, dpi) } else { 0 };
-        if layout.menu.is_some() != member.want.menu || layout.up.is_some() != member.want.up
-            || layout.close.is_some() != member.want.close
-            || layout.span.1 - layout.span.0 - folder_space < px(SEGMENT_TITLE_MIN, dpi) { return None }
+        let mut want = member.want;
+        let layout = loop {
+            let layout = layout_title(&TitleLayoutInput { strip: hit, dpi, want, folder: member.folder, text_w: member.text_w });
+            if layout.span.1 - layout.span.0 - folder_space >= px(SEGMENT_TITLE_MIN, dpi) { break layout }
+            if want.close { want.close = false } else if want.up { want.up = false } else if want.menu { want.menu = false } else { return None }
+        };
         out.push(TabSegment { hit, layout });
     }
     Some(out)

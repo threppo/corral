@@ -34,7 +34,7 @@ use super::selection::{self, Modifiers, PressAction, Release};
 /// Zone of a point on the painted Corral (grid-snapping-spec 3.1): the bands sit inside the painted
 /// rectangles, a folded Corral answers on its left and right edges only, and the anchored edge of a
 /// docked Corral has no zone. `buttons` are the title's own glyphs in the same coordinates.
-fn group_hit_zone(geo: &super::GroupGeometry, group: &crate::model::Group,
+pub(super) fn group_hit_zone(geo: &super::GroupGeometry, group: &crate::model::Group,
     point: (i32, i32), locked: bool, buttons: &[Rect]) -> EdgeZone {
     let edge = group.dock_edge();
     let ctx = ZoneCtx {
@@ -568,6 +568,9 @@ impl App {
                     .filter(|n| home.is_some() || self.loose_on_screen(n)),
             );
         }
+        // Two Gates on one folder both list a selected path: act on each file once.
+        let mut seen = std::collections::HashSet::new();
+        order.retain(|n| seen.insert(n.to_lowercase()));
         order
     }
 
@@ -763,7 +766,7 @@ impl App {
             k if ctrl && k == b'V' as u16 => self.paste_files(target, None),
             k if k == VK_RETURN.0 => {
                 let names = self.selected_in_display_order();
-                if let [name] = names.as_slice() { if self.gate_open(name) { return Some(LRESULT(0)); } }
+                if let [name] = names.as_slice() { if self.gate_open(name, target) { return Some(LRESULT(0)); } }
                 self.open_items(&names); // asks first above Explorer's multiple-invoke minimum
             }
             k if k == VK_DELETE.0 => {
@@ -1952,7 +1955,7 @@ impl App {
                 if on_title && self.settings.rollup_enabled && self.settings.rollup_double_click_to_toggle {
                     self.toggle_roll(id);
                 } else if let Some(name) = self.item_in_group(index, point) {
-                    if !self.gate_open(&name) { let _ = shell::open_item(&name); }
+                    if !self.gate_open(&name, Some(id)) { let _ = shell::open_item(&name); }
                 } else if self.portals.contains_key(&id) && self.groups[index].body.contains(point.0, point.1) {
                     self.portal_open_folder(id); // empty Gate body: Open folder (corral-views-spec 2.3)
                 }

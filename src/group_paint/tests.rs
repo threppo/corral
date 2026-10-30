@@ -436,8 +436,14 @@ fn plate_and_glyph_alphas_follow_the_states() {
 }
 
 #[test]
-fn up_at_the_root_is_disabled_not_removed() {
+fn a_disabled_up_draws_dimmed_and_an_unwanted_up_draws_nothing() {
+    // The app asks for Up only while it can act (hidden at the root, user decision 2026-10-30).
     let mut p = inputs(96, "Docs", None);
+    p.layout = layout_title(&TitleLayoutInput {
+        strip: p.strip.unwrap(), dpi: 96, want: ButtonSet { menu: true, up: false, close: true }, folder: true, text_w: 60,
+    });
+    assert!(p.layout.up.is_none());
+    assert!(!record(&p).iter().any(|op| matches!(op, Op::Glyph(Glyph::Up, ..))), "no Up glyph at the root");
     p.layout = layout_title(&TitleLayoutInput {
         strip: p.strip.unwrap(), dpi: 96, want: ButtonSet { menu: true, up: true, close: true }, folder: true, text_w: 60,
     });
