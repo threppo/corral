@@ -92,7 +92,9 @@ pub(super) fn receive(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     let result = INBOX.with(|cell| {
         let mut i = cell.borrow_mut();
         if i.hwnd != hwnd.0 as isize || !style_request::same_layout(&r.layout_path, &i.path) { return LRESULT(0); }
-        if i.isolated || r.target.is_some_and(|id| !i.ids.contains(&id)) { return LRESULT(2); }
+        // 3: a preview on the real settings never stores colours (the page says so instead of "Couldn't save").
+        if i.isolated { return LRESULT(3); }
+        if r.target.is_some_and(|id| !i.ids.contains(&id)) { return LRESULT(2); }
         if !i.pending.push(r) { color_log("reject: inbox full"); return LRESULT(2); } // JSON and all borrowed COPYDATA bytes now owned.
         LRESULT(1)
     });

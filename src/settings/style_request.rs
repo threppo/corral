@@ -232,6 +232,8 @@ pub mod status {
     pub const FILE_SAVE_FAILED: usize = 2;
     /// The engine could not store a commit; it put the stored look back (colour-state-spec 3.4).
     pub const ENGINE_SAVE_FAILED: usize = 4;
+    /// The engine is a preview on the real settings: it never stores colours.
+    pub const PREVIEW_ONLY: usize = 5;
 }
 
 /// One message of the live colour channel (colour-state-spec 3.2). A draft frame carries the
@@ -286,7 +288,7 @@ pub fn live_guard(request: &LiveRequest, engine_path: &Path, layout: &Layout, is
     Ok(())
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LiveOutcome { Applied, Rejected, Unavailable }
+pub enum LiveOutcome { Applied, Rejected, Unavailable, PreviewOnly }
 /// CorralMessage is a hidden top-level popup, not HWND_MESSAGE. Bound the entire discovery/send.
 pub fn send_live(request: &LiveRequest) -> LiveOutcome {
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -308,6 +310,7 @@ pub fn send_live(request: &LiveRequest) -> LiveOutcome {
         let answered = unsafe { SendMessageTimeoutW(hwnd, WM_COPYDATA, WPARAM(0), LPARAM(&data as *const _ as isize), SMTO_ABORTIFHUNG | SMTO_BLOCK, left as u32, Some(&mut result)) };
         if answered.0 != 0 {
             if result == 1 { return LiveOutcome::Applied; }
+            if result == 3 { return LiveOutcome::PreviewOnly; }
             if result == 2 { rejected = true; }
         }
     }

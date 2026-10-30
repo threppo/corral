@@ -237,16 +237,76 @@ fn icon_from_image_list(name: &str, size: u32, policy: crate::icon_overlay::Poli
             }
         }
     }
-    let (native, list) = candidates.into_iter().min_by_key(|(score, _, _)| *score).map(|(_, native, list)| (native, list))
+    let mut candidate = candidates.iter().min_by_key(|(score, _, _)| *score)
         .ok_or_else(|| windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL))?;
-    // INDEXTOOVERLAYMASK: the selected overlay occupies bits 8..11 of the draw flags.
-    let icon = unsafe { list.GetIcon(info.iIcon & 0x00ff_ffff, ILD_TRANSPARENT.0 | (overlay << 8))? };
+    let index = info.iIcon & 0x00ff_ffff;
+    let render = |list: &IImageList, native: u32, overlay: u32| {
+        // INDEXTOOVERLAYMASK: the selected overlay occupies bits 8..11 of the draw flags.
+        let icon = unsafe { list.GetIcon(index, ILD_TRANSPARENT.0 | (overlay << 8))? };
+        let result = icon_to_bgra(icon, native);
+        unsafe { let _ = DestroyIcon(icon); }
+        result
+    };
     // Render at the list's own size and resample here: DrawIconEx scales a 256 px jumbo icon down to an
     // arbitrary size by point sampling, which leaves single aliased rim pixels that the global Tint
     // (mid-grey boost) turns into bright specks (observed 2026-10-15, AIOStreams.lnk at icon_dip 53).
-    let result = icon_to_bgra(icon, native).map(|bitmap| resize_icon(bitmap, size));
-    unsafe { let _ = DestroyIcon(icon); }
-    result
+    loop {
+        let (_, native, list) = candidate;
+        // Inspect the base: an overlay at the bottom of the slot can hide the small artwork's bounds.
+        let base = render(list, *native, 0)?;
+        let cropped = crop_corner_icon(base);
+        if cropped.width < *native {
+            if overlay == 0 {
+                return Ok(resize_icon(cropped, size));
+            }
+            // Let the Shell compose the overlay in a smaller slot rather than crop its arrow away.
+            if let Some(smaller) = candidates.iter().filter(|(_, width, _)| width < native)
+                .max_by_key(|(_, width, _)| *width) {
+                candidate = smaller;
+                continue;
+            }
+        }
+        let bitmap = if overlay == 0 { cropped } else { render(list, *native, overlay)? };
+        return Ok(resize_icon(bitmap, size));
+    }
+}
+
+/// Some system image lists leave small-only artwork unscaled at the slot's origin.
+/// Crop to its smallest standard square, retaining padding inside that square. Require the
+/// alpha bounds to touch both origin edges and occupy at most half the slot in each axis;
+/// larger, centred, empty and non-square images pass through byte-for-byte unchanged.
+fn crop_corner_icon(bitmap: IconBitmap) -> IconBitmap {
+    let slot = bitmap.width as usize;
+    if bitmap.width != bitmap.height || slot == 0
+        || slot.checked_mul(slot).and_then(|n| n.checked_mul(4)) != Some(bitmap.bgra_premultiplied.len()) {
+        return bitmap;
+    }
+    // Margins inside the small artwork are fine: everything visible must sit in the top-left quadrant.
+    let (mut right, mut bottom) = (0, 0);
+    for (i, pixel) in bitmap.bgra_premultiplied.chunks_exact(4).enumerate() {
+        if pixel[3] != 0 {
+            let (x, y) = (i % slot, i / slot);
+            // No supported crop can contain this pixel. Most full-size icons exit early.
+            if x >= 64 || y >= 64 || x >= slot / 2 || y >= slot / 2 {
+                return bitmap;
+            }
+            right = right.max(x + 1);
+            bottom = bottom.max(y + 1);
+        }
+    }
+    if right == 0 {
+        return bitmap; // nothing visible
+    }
+    let Some(side) = [16usize, 24, 32, 48, 64].into_iter()
+        .find(|&side| side >= right.max(bottom) && side <= slot / 2) else {
+        return bitmap;
+    };
+    let mut pixels = Vec::with_capacity(side * side * 4);
+    for y in 0..side {
+        pixels.extend_from_slice(&bitmap.bgra_premultiplied[y * slot * 4..][..side * 4]);
+    }
+    IconBitmap { width: side as u32, height: side as u32,
+        bgra_premultiplied: pixels, cache_key: bitmap.cache_key }
 }
 
 /// Resamples a premultiplied BGRA icon to `size` x `size`: an area (box) filter when shrinking, so
@@ -439,6 +499,138 @@ pub fn open_item(parsing_name: &str) -> windows::core::Result<()> {
     let result = unsafe { ShellExecuteExW(&mut info) };
     unsafe { CoTaskMemFree(Some(pidl as *const c_void)) };
     result
+}
+
+// Kept separate from the COM tests so the synthetic cases can run with the Shell suite skipped.
+#[cfg(test)]
+mod small_icon_tests {
+    use super::*;
+
+    fn corner(slot: u32, side: u32) -> IconBitmap {
+        let mut pixels = vec![0; (slot * slot * 4) as usize];
+        for y in 0..side {
+            for x in 0..side {
+                pixels[((y * slot + x) * 4) as usize..][..4].copy_from_slice(&[7, 11, 13, 255]);
+            }
+        }
+        IconBitmap { width: slot, height: slot, bgra_premultiplied: pixels, cache_key: None }
+    }
+
+    fn assert_corner_fills_cell(side: u32) {
+        let cropped = crop_corner_icon(corner(256, side));
+        assert_eq!((cropped.width, cropped.height), (side, side));
+        assert_eq!(cropped.bgra_premultiplied, corner(side, side).bgra_premultiplied);
+        let resized = resize_icon(cropped, 80);
+        assert!(resized.bgra_premultiplied.chunks_exact(4).all(|p| p == [7, 11, 13, 255]));
+    }
+
+    fn assert_unchanged(bitmap: IconBitmap) {
+        let result = crop_corner_icon(bitmap.clone());
+        assert_eq!((result.width, result.height), (bitmap.width, bitmap.height));
+        assert_eq!(result.bgra_premultiplied, bitmap.bgra_premultiplied);
+        assert_eq!(result.cache_key, bitmap.cache_key);
+    }
+
+    #[test]
+    fn corner_16_in_256_fills_cell() { assert_corner_fills_cell(16); }
+
+    #[test]
+    fn corner_32_in_256_fills_cell() { assert_corner_fills_cell(32); }
+
+    #[test]
+    fn corner_48_in_256_fills_cell() { assert_corner_fills_cell(48); }
+
+    #[test]
+    fn other_standard_sizes_and_extra_large_slots() {
+        for side in [24, 64] { assert_corner_fills_cell(side); }
+        assert_eq!(crop_corner_icon(corner(48, 16)).width, 16);
+        assert_eq!(crop_corner_icon(corner(64, 32)).width, 32);
+    }
+
+    #[test]
+    fn full_slot_is_unchanged() { assert_unchanged(corner(256, 256)); }
+
+    #[test]
+    fn empty_slot_is_unchanged() { assert_unchanged(corner(256, 0)); }
+
+    #[test]
+    fn legitimate_origin_artwork_spanning_more_than_half_is_unchanged() {
+        assert_unchanged(corner(256, 160));
+        assert_unchanged(corner(48, 32));
+    }
+
+    #[test]
+    fn centred_artwork_is_unchanged_and_a_small_icon_with_margins_is_cropped() {
+        let art = |offset: usize, side: usize| {
+            let mut bitmap = corner(256, 0);
+            for y in offset..offset + side {
+                for x in offset..offset + side {
+                    bitmap.bgra_premultiplied[(y * 256 + x) * 4 + 3] = 255;
+                }
+            }
+            bitmap
+        };
+        assert_unchanged(art(112, 32));
+        // a 32 px icon whose artwork has a 2 px transparent margin
+        assert_eq!(crop_corner_icon(art(2, 28)).width, 32);
+    }
+
+    #[test]
+    fn crop_retains_standard_square_padding_pixels_and_cache_key() {
+        let mut bitmap = corner(256, 0);
+        // Non-square alpha bounds, partial alpha, and transparent RGB data within the standard cell.
+        for y in 0..29 {
+            for x in 0..21 {
+                bitmap.bgra_premultiplied[(y * 256 + x) * 4..][..4]
+                    .copy_from_slice(&[x as u8, y as u8, 30, 63]);
+            }
+        }
+        let key = crate::icon_overlay::CacheKey::new("synthetic.lnk", 80, crate::icon_overlay::Policy(0));
+        bitmap.cache_key = Some(key.clone());
+        let cropped = crop_corner_icon(bitmap.clone());
+        assert_eq!((cropped.width, cropped.height), (32, 32));
+        assert_eq!(cropped.cache_key, Some(key));
+        for y in 0..32 {
+            assert_eq!(&cropped.bgra_premultiplied[y * 32 * 4..][..32 * 4],
+                &bitmap.bgra_premultiplied[y * 256 * 4..][..32 * 4]);
+        }
+    }
+
+    #[test]
+    fn normal_icon_with_bottom_left_overlay_has_identical_resized_pixels() {
+        let mut bitmap = corner(256, 192);
+        for y in 224..256 {
+            for x in 0..32 {
+                bitmap.bgra_premultiplied[(y * 256 + x) * 4..][..4].copy_from_slice(&[255; 4]);
+            }
+        }
+        for size in [32, 53, 80, 256] {
+            let old = resize_icon(bitmap.clone(), size);
+            let new = resize_icon(crop_corner_icon(bitmap.clone()), size);
+            assert_eq!(new.bgra_premultiplied, old.bgra_premultiplied);
+        }
+    }
+
+    #[test]
+    fn small_artwork_with_distant_overlay_is_not_cropped_away() {
+        let mut composite = corner(256, 32);
+        composite.bgra_premultiplied[(255 * 256) * 4 + 3] = 255;
+        assert_unchanged(composite);
+        assert_eq!(crop_corner_icon(corner(256, 32)).width, 32);
+    }
+
+    #[test]
+    fn native_small_non_square_and_invalid_buffers_are_unchanged() {
+        assert_unchanged(corner(16, 16));
+        assert_unchanged(corner(0, 0));
+        let mut rectangular = corner(256, 16);
+        rectangular.height = 128;
+        rectangular.bgra_premultiplied.truncate(256 * 128 * 4);
+        assert_unchanged(rectangular);
+        let mut truncated = corner(256, 16);
+        truncated.bgra_premultiplied.pop();
+        assert_unchanged(truncated);
+    }
 }
 
 #[cfg(test)]

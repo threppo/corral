@@ -444,6 +444,7 @@ impl App {
             at_root,
             mode: self.group_view(id).mode(),
             icon_px: 0,
+            icon_zoom: group.icon_zoom,
             header_hidden: false,
             hide_arrows: group.hide_link_overlays,
             sort: self.gate_sort_of(id),
@@ -464,6 +465,10 @@ impl App {
     fn run_gate_command(&mut self, id: u64, command: u32) {
         use portal_menu::id as ids;
         if self.column_command(id, command) { return; }
+        if let Some(percent) = crate::icon_zoom::preset_percent(command, portal_menu::id::ICON_SIZE_SMALL) {
+            self.set_group_icon_zoom(id, percent);
+            return;
+        }
         match command {
             ids::CLASSIC => self.set_group_view(id, view_state::View::Icons),
             ids::LIST => self.set_group_view(id, view_state::View::List),
@@ -774,7 +779,7 @@ impl App {
     }
 }
 
-/// Turn the Gate menu model into `HMENU` items: hidden items are left out, a disabled item is grayed,
+/// Turn the shared content menu model into `HMENU` items: hidden items are left out, a disabled item is grayed,
 /// a checked item carries the check mark or the radio bullet.
 pub(super) unsafe fn append_gate_items(menu: HMENU, items: &[portal_menu::Item]) {
     for item in items.iter().filter(|i| !i.hidden) {
@@ -784,7 +789,8 @@ pub(super) unsafe fn append_gate_items(menu: HMENU, items: &[portal_menu::Item])
                 Kind::Submenu(children) => {
                     if let Ok(sub) = CreatePopupMenu() {
                         append_gate_items(sub, children);
-                        let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, &HSTRING::from(item.label));
+                        let flags = if item.enabled { MF_POPUP } else { MF_POPUP | MF_GRAYED };
+                        let _ = AppendMenuW(menu, flags, sub.0 as usize, &HSTRING::from(item.label));
                     }
                 }
                 kind => {
@@ -829,6 +835,22 @@ fn pick_folder_with(owner: HWND, title: Option<&str>, initial: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_icon_size_popup_is_grayed_only_in_row_views() {
+        for view in [view_state::View::Icons, view_state::View::List, view_state::View::Details] {
+            for first in [portal_menu::id::ICON_SIZE_SMALL, group_menu::MENU_BASE as u32 + group_menu::corral_cmd::ICON_SIZE_SMALL] {
+                unsafe {
+                    let menu = CreatePopupMenu().unwrap();
+                    append_gate_items(menu, &[portal_menu::icon_size_menu(view, None, first)]);
+                    let flags = GetMenuState(menu, 0, MF_BYPOSITION);
+                    let _ = DestroyMenu(menu);
+                    assert_ne!(flags, u32::MAX, "submenu is present");
+                    assert_eq!(flags & MF_GRAYED.0 != 0, view != view_state::View::Icons);
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_stored_gate_sort_maps_to_the_corral_sort() {

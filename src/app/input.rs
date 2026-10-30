@@ -1714,8 +1714,10 @@ impl App {
                 self.begin_resize(index, point, zone);
                 Some(LRESULT(0))
             }
+            // The resize band (also where the scrollbar passes input through) never opens or drags the row under it.
+            WM_LBUTTONDBLCLK if self.edge_zone(index, point).is_edge() => Some(LRESULT(0)),
             WM_RBUTTONDOWN if !on_title => {
-                if let Some(name) = self.item_in_group(index, point) {
+                if let Some(name) = self.item_in_group(index, point).filter(|_| !self.edge_zone(index, point).is_edge()) {
                     let rect = self.groups[index].rect;
                     let screen = self.to_screen((point.0 + rect.left, point.1 + rect.top));
                     let body = self.groups[index].body;
@@ -2020,7 +2022,7 @@ impl App {
 
     /// Ctrl + wheel over an ordinary Corral: one zoom step per wheel notch (`icon_zoom.rs`), only for this
     /// Corral (each tab keeps its own zoom). True when the wheel was taken (also while a
-    /// fractional notch is still accumulating); false for portals (their Explorer view zooms itself) and
+    /// fractional notch is still accumulating); false for Gates and
     /// rolled-up Corrals, which keep the plain wheel behaviour.
     fn zoom_group_icons(&mut self, index: usize, delta: i32) -> bool {
         let id = self.groups[index].id;
@@ -2033,15 +2035,24 @@ impl App {
         if notches == 0 {
             return true;
         }
-        let dpi = self.group_dpi(id);
-        let geo = self.group_geometry(&group);
-        let old_cell = self.group_cells(id, dpi);
         let mut zoom = group.icon_zoom;
         for _ in 0..notches.unsigned_abs() {
             zoom = crate::icon_zoom::step(zoom, notches > 0);
         }
+        self.set_group_icon_zoom(id, crate::icon_zoom::percent(zoom));
+        true
+    }
+
+    /// Shared wheel/menu path: each Corral or Gate keeps its own zoom and first visible row.
+    pub(super) fn set_group_icon_zoom(&mut self, id: u64, percent: u32) {
+        if self.group_view(id) != crate::view_state::View::Icons { return; }
+        let Some(group) = self.layout.groups.iter().find(|g| g.id == id).cloned() else { return };
+        let dpi = self.group_dpi(id);
+        let geo = self.group_geometry(&group);
+        let old_cell = self.group_cells(id, dpi);
+        let zoom = crate::icon_zoom::canonical(percent);
         if zoom == group.icon_zoom || !self.layout.set_icon_zoom(id, zoom) {
-            return true; // already at the end of the range
+            return; // already at this size (or at the end of the wheel range)
         }
         // the item at the top of the view stays at the top (grid-snapping-spec 2.2)
         let new_cell = self.group_cells(id, dpi);
@@ -2062,7 +2073,6 @@ impl App {
             }
         }
         self.arm_layout_save();
-        true
     }
 
     /// Re-arm the 3 s debounced layout save.

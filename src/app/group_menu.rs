@@ -42,8 +42,28 @@ pub(super) mod corral_cmd {
     pub const VIEW_ICONS: u32 = 25;
     pub const VIEW_LIST: u32 = 26;
     pub const VIEW_DETAILS: u32 = 27;
+    pub const ICON_SIZE_SMALL: u32 = 28;
+    #[cfg(test)]
+    pub const ICON_SIZE_MEDIUM: u32 = 29;
+    #[cfg(test)]
+    pub const ICON_SIZE_LARGE: u32 = 30;
+    #[cfg(test)]
+    pub const ICON_SIZE_EXTRA_LARGE: u32 = 31;
 }
 use corral_cmd::*;
+
+/// View-mode radios followed by the shared, per-Corral icon-size submenu.
+fn content_view_menu(view: crate::view_state::View, zoom: Option<u16>) -> Vec<crate::portal_menu::Item> {
+    use crate::portal_menu::{self, Item};
+    use crate::view_state::View;
+    vec![
+        Item::radio((BASE + VIEW_ICONS as usize) as u32, "Icons", view == View::Icons),
+        Item::radio((BASE + VIEW_LIST as usize) as u32, "List", view == View::List),
+        Item::radio((BASE + VIEW_DETAILS as usize) as u32, "Details", view == View::Details),
+        Item::separator(),
+        portal_menu::icon_size_menu(view, zoom, (BASE + ICON_SIZE_SMALL as usize) as u32),
+    ]
+}
 
 /// Corral sort commands and persisted sort methods are separate namespaces.
 const SORT_COMMANDS: [(u32, u32); 6] = [
@@ -575,12 +595,7 @@ impl App {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let tab_members = self.append_tabs_menu(menu, None, id);
             if let Ok(view_menu) = CreatePopupMenu() {
-                let _ = AppendMenuW(view_menu, MF_STRING, BASE + VIEW_ICONS as usize, w!("Icons"));
-                let _ = AppendMenuW(view_menu, MF_STRING, BASE + VIEW_LIST as usize, w!("List"));
-                let _ = AppendMenuW(view_menu, MF_STRING, BASE + VIEW_DETAILS as usize, w!("Details"));
-                let checked = BASE + match self.group_view(id) { crate::view_state::View::Icons => VIEW_ICONS, crate::view_state::View::List => VIEW_LIST, crate::view_state::View::Details => VIEW_DETAILS } as usize;
-                let _ = CheckMenuRadioItem(view_menu, (BASE + VIEW_ICONS as usize) as u32,
-                    (BASE + VIEW_DETAILS as usize) as u32, checked as u32, MF_BYCOMMAND.0);
+                super::portals::append_gate_items(view_menu, &content_view_menu(self.group_view(id), group.icon_zoom));
                 let _ = AppendMenuW(view_menu, MF_SEPARATOR, 0, PCWSTR::null());
                 if self.group_view(id) == crate::view_state::View::Details {
                     if let Ok(columns) = CreatePopupMenu() {
@@ -649,6 +664,10 @@ impl App {
 
     /// Apply a shared View command using the Corral-owned command namespace.
     pub(super) fn view_command(&mut self, id: u64, cmd: u32) {
+        if let Some(percent) = crate::icon_zoom::preset_percent(cmd, ICON_SIZE_SMALL) {
+            self.set_group_icon_zoom(id, percent);
+            return;
+        }
         // Page/opacity/roll belong to the visible set; RGB, fonts and sorting remain private.
         let id = if cmd == ALL_PAGES || cmd == ROLL_UP || (OPACITY_FIRST..OPACITY_FIRST + 6).contains(&cmd) {
             tabs::collect(&self.layout.groups, id).map_or(id, |v| v.active)
@@ -1045,6 +1064,69 @@ mod tests {
                 "Colors…",
             ]
         );
+    }
+
+    #[test]
+    fn content_view_menu_has_radio_sizes_disabled_outside_icons() {
+        use crate::portal_menu::Kind;
+        use crate::view_state::View;
+        let commands = [ICON_SIZE_SMALL, ICON_SIZE_MEDIUM, ICON_SIZE_LARGE, ICON_SIZE_EXTRA_LARGE];
+        assert_eq!(commands, [28, 29, 30, 31]);
+        for view in [View::Icons, View::List, View::Details] {
+            for zoom in [None, Some(75), Some(100), Some(150), Some(200), Some(130)] {
+                let menu = content_view_menu(view, zoom);
+                assert_eq!(menu.iter().map(|i| i.label).collect::<Vec<_>>(), ["Icons", "List", "Details", "", "Icon size"]);
+                for (index, mode) in [View::Icons, View::List, View::Details].into_iter().enumerate() {
+                    assert_eq!(menu[index].id, (BASE + VIEW_ICONS as usize + index) as u32);
+                    assert_eq!(menu[index].kind, Kind::Radio);
+                    assert_eq!(menu[index].checked, view == mode);
+                }
+                assert_eq!(menu[3].kind, Kind::Separator);
+                assert_eq!(menu[4].enabled, view == View::Icons);
+                let Kind::Submenu(sizes) = &menu[4].kind else { panic!() };
+                assert_eq!(sizes.len(), 4);
+                for (index, &(label, percent)) in crate::icon_zoom::PRESETS.iter().enumerate() {
+                    let item = &sizes[index];
+                    assert_eq!(item.id, (BASE + commands[index] as usize) as u32);
+                    assert_eq!(item.label, label);
+                    assert_eq!(item.kind, Kind::Radio);
+                    assert_eq!(item.enabled, view == View::Icons);
+                    assert_eq!(item.checked, crate::icon_zoom::percent(zoom) == percent);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn size_commands_store_canonical_zoom_only_on_the_addressed_tab() {
+        let mut layout = model::Layout::new();
+        for content in [GroupContent::Items { items: Vec::new() }, GroupContent::Portal { path: "scratch".into() }] {
+            layout.add_group("QA".into(), String::new(), crate::geometry::Rect::new(20, 100, 320, 300), content);
+        }
+        for (index, group) in layout.groups.iter_mut().enumerate() {
+            group.tab = Some(tabs::TabMembership { set_id: 1, index: index as u32, selected: index == 1 });
+        }
+        let rects: Vec<_> = layout.groups.iter().map(|g| g.rect).collect();
+        for first in [ICON_SIZE_SMALL, crate::portal_menu::id::ICON_SIZE_SMALL] {
+            for target in 0..2 {
+                let other = 1 - target;
+                let other_zoom = layout.groups[other].icon_zoom;
+                for (offset, expected) in [(0, Some(75)), (2, Some(150)), (3, Some(200)), (1, None)] {
+                    let percent = crate::icon_zoom::preset_percent(first + offset, first).unwrap();
+                    let id = layout.groups[target].id;
+                    layout.set_icon_zoom(id, crate::icon_zoom::canonical(percent));
+                    assert_eq!(layout.groups[target].icon_zoom, expected);
+                    assert_eq!(layout.groups[other].icon_zoom, other_zoom);
+                    assert_eq!(layout.groups.iter().map(|g| g.rect).collect::<Vec<_>>(), rects);
+                    let json = serde_json::to_string(&layout).unwrap();
+                    let saved: model::Layout = serde_json::from_str(&json).unwrap();
+                    assert_eq!(saved.groups[target].icon_zoom, expected);
+                    if expected.is_none() { assert!(!json.contains("icon_zoom")); }
+                }
+            }
+            assert_eq!(crate::icon_zoom::preset_percent(first - 1, first), None);
+            assert_eq!(crate::icon_zoom::preset_percent(first + 4, first), None);
+        }
     }
 
     #[test]

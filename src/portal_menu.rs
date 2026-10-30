@@ -34,7 +34,13 @@ pub mod id {
     pub const COLUMN_TYPE: u32 = 0x6131;
     pub const COLUMN_DATE: u32 = 0x6132;
     pub const COLUMN_RESET: u32 = 0x6133;
-    pub const LAST: u32 = COLUMN_RESET;
+    pub const ICON_SIZE_SMALL: u32 = 0x6140;
+    #[cfg(test)]
+    pub const ICON_SIZE_MEDIUM: u32 = 0x6141;
+    #[cfg(test)]
+    pub const ICON_SIZE_LARGE: u32 = 0x6142;
+    pub const ICON_SIZE_EXTRA_LARGE: u32 = 0x6143;
+    pub const LAST: u32 = ICON_SIZE_EXTRA_LARGE;
 
     /// Whether `command` belongs to the Gate family.
     pub fn is_gate(command: u32) -> bool {
@@ -72,6 +78,8 @@ pub struct GateMenuState {
     pub mode: i32,
     /// The effective icon size in pixels of the icon view.
     pub icon_px: i32,
+    /// Per-Corral zoom; `None` follows the desktop at 100 %.
+    pub icon_zoom: Option<u16>,
     /// The folder flag "header hidden".
     pub header_hidden: bool,
     /// The shortcut-arrow flag of the settings dialog.
@@ -89,7 +97,7 @@ pub enum Kind {
     Submenu(Vec<Item>),
 }
 
-/// One menu item: ids are the Gate family's, labels are English and never name another product.
+/// One menu item: ids come from the caller's command family; labels are English.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub id: u32,
@@ -107,10 +115,10 @@ impl Item {
     fn check(id: u32, label: &'static str, checked: bool) -> Item {
         Item { id, label, enabled: true, checked, hidden: false, kind: Kind::Check }
     }
-    fn radio(id: u32, label: &'static str, checked: bool) -> Item {
+    pub(crate) fn radio(id: u32, label: &'static str, checked: bool) -> Item {
         Item { id, label, enabled: true, checked, hidden: false, kind: Kind::Radio }
     }
-    fn separator() -> Item {
+    pub(crate) fn separator() -> Item {
         Item { id: 0, label: "", enabled: true, checked: false, hidden: false, kind: Kind::Separator }
     }
     fn submenu(label: &'static str, items: Vec<Item>) -> Item {
@@ -138,6 +146,16 @@ pub fn column_menu(columns: &crate::view_state::DetailsColumns) -> Vec<Item> {
         Item::check(id::COLUMN_DATE, "Date modified", columns.contains(ColumnKey::DateModified)),
         Item::separator(), Item::command(id::COLUMN_RESET, "Reset columns")]
 }
+
+/// Shared by the Corral and Gate View menus; each supplies its own command namespace.
+pub fn icon_size_menu(view: crate::view_state::View, zoom: Option<u16>, first: u32) -> Item {
+    let enabled = view == crate::view_state::View::Icons;
+    let items = crate::icon_zoom::PRESETS.iter().enumerate().map(|(index, &(label, percent))| {
+        Item::radio(first + index as u32, label, crate::icon_zoom::percent(zoom) == percent).disabled(!enabled)
+    }).collect();
+    Item::submenu("Icon size", items).disabled(!enabled)
+}
+
 pub fn gate_menu_columns(s: &GateMenuState, columns: &crate::view_state::DetailsColumns) -> Vec<Item> {
     let mode = crate::view_state::View::from_mode(s.mode);
     let mut view = vec![
@@ -145,9 +163,10 @@ pub fn gate_menu_columns(s: &GateMenuState, columns: &crate::view_state::Details
         Item::radio(id::LIST, "List", mode == crate::view_state::View::List),
         Item::radio(id::DETAILS, "Details", mode == crate::view_state::View::Details),
         Item::separator(),
+        icon_size_menu(mode, s.icon_zoom, id::ICON_SIZE_SMALL),
         Item::check(id::HIDE_ARROWS, "Hide shortcut arrows", s.hide_arrows),
     ];
-    if mode == crate::view_state::View::Details { view.insert(3, Item::separator()); view.insert(4, Item::submenu("Columns", column_menu(columns))); }
+    if mode == crate::view_state::View::Details { view.insert(5, Item::separator()); view.insert(6, Item::submenu("Columns", column_menu(columns))); }
     let stored = (1..=4).contains(&s.sort.abs());
     let mut sort: Vec<Item> = SORTS.iter().map(|&(id, label, column)| Item::radio(id, label, s.sort.abs() == column)).collect();
     sort.push(Item::separator());
@@ -341,7 +360,7 @@ mod tests {
     }
 
     fn state() -> GateMenuState {
-        GateMenuState { allow: true, at_root: false, mode: MODE_ICON, icon_px: 48, header_hidden: false, hide_arrows: false, sort: 1 }
+        GateMenuState { allow: true, at_root: false, mode: MODE_ICON, icon_px: 48, icon_zoom: None, header_hidden: false, hide_arrows: false, sort: 1 }
     }
 
     // ---- test 7 --------------------------------------------------------------------------------
@@ -365,7 +384,7 @@ mod tests {
         ]);
         let Kind::Submenu(view) = &menu[9].kind else { panic!() };
         let view: Vec<(u32, &str)> = view.iter().map(|i| (i.id, i.label)).collect();
-        assert_eq!(view, [(0x6113, "Icons"), (0x6114, "List"), (0x6115, "Details"), (0, ""), (0x6117, "Hide shortcut arrows")]);
+        assert_eq!(view, [(0x6113, "Icons"), (0x6114, "List"), (0x6115, "Details"), (0, ""), (0, "Icon size"), (0x6117, "Hide shortcut arrows")]);
         let Kind::Submenu(sort) = &menu[10].kind else { panic!() };
         let sort: Vec<(u32, &str)> = sort.iter().map(|i| (i.id, i.label)).collect();
         assert_eq!(sort, [(0x6120, "Name"), (0x6121, "Size"), (0x6122, "Item type"), (0x6123, "Date modified"), (0, ""), (0x6124, "Reverse order")]);
@@ -379,7 +398,7 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "unique");
-        assert_eq!(count, 16);
+        assert_eq!(count, 20);
         for id in &ids {
             assert!((id::FIRST..=id::LAST).contains(id), "{id:#x}");
             assert!(id::is_gate(*id));
@@ -407,6 +426,32 @@ mod tests {
                 assert_eq!(items[3].kind,Kind::Separator);
                 assert_eq!(items[4].label,"Reset columns");
             } else { assert!(submenu.is_none()); }
+        }
+    }
+
+    #[test]
+    fn icon_sizes_have_stable_ids_and_exact_zoom_checks_in_every_view() {
+        let ids = [id::ICON_SIZE_SMALL, id::ICON_SIZE_MEDIUM, id::ICON_SIZE_LARGE, id::ICON_SIZE_EXTRA_LARGE];
+        assert_eq!(ids, [0x6140, 0x6141, 0x6142, 0x6143]);
+        for mode in [MODE_ICON, MODE_LIST, MODE_DETAILS] {
+            for zoom in [None, Some(75), Some(100), Some(150), Some(200), Some(130)] {
+                let menu = gate_menu(&GateMenuState { mode, icon_zoom: zoom, ..state() });
+                let Kind::Submenu(view) = &menu[9].kind else { panic!() };
+                assert_eq!(view[3].kind, Kind::Separator);
+                let sizes = &view[4];
+                assert_eq!(sizes.label, "Icon size");
+                assert_eq!(sizes.enabled, mode == MODE_ICON);
+                let Kind::Submenu(items) = &sizes.kind else { panic!() };
+                assert_eq!(items.len(), 4);
+                assert_eq!(items.iter().map(|i| i.label).collect::<Vec<_>>(), ["Small", "Medium", "Large", "Extra large"]);
+                for (index, &(label, percent)) in crate::icon_zoom::PRESETS.iter().enumerate() {
+                    let item = &items[index];
+                    assert_eq!((item.id, item.label, &item.kind), (ids[index], label, &Kind::Radio));
+                    assert_eq!(item.checked, crate::icon_zoom::percent(zoom) == percent);
+                    assert_eq!(item.enabled, mode == MODE_ICON);
+                    assert_eq!(crate::icon_zoom::preset_percent(item.id, id::ICON_SIZE_SMALL), Some(percent));
+                }
+            }
         }
     }
 

@@ -277,10 +277,22 @@ fn an_asynchronous_save_failure_shows_what_is_stored_with_the_caption() {
     let commit = p.commit_edit(ColorEdit::Background(BLUE)).pop().unwrap();
     store(&mut p, &commit);
     assert_eq!(p.stored_effective().color, BLUE);
-    p.save_failed(Globals::from_settings(&Settings::default()), infos(&l));
+    p.save_failed(Globals::from_settings(&Settings::default()), infos(&l), Caption::SaveFailed);
     assert_eq!(p.stored_effective().color, Settings::default().color);
     assert!(p.caption().unwrap().is_error());
     assert_eq!(p.scope(), Scope::Corral(id));
+}
+
+#[test]
+fn a_preview_on_the_real_settings_says_so_and_a_later_save_clears_it() {
+    let l = layout(1);
+    let mut p = page(&l, &Settings::default(), Scope::All);
+    p.save_failed(Globals::from_settings(&Settings::default()), infos(&l), Caption::PreviewOnly);
+    let caption = p.caption().unwrap();
+    assert!(!caption.is_error() && caption.text().contains("preview"));
+    let commit = p.commit_edit(ColorEdit::Background(BLUE)).pop().unwrap();
+    store(&mut p, &commit);
+    assert_eq!(p.caption(), None);
 }
 
 #[test]

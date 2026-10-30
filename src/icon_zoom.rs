@@ -13,6 +13,14 @@ pub const STEP: u32 = 10;
 /// One wheel notch (`WHEEL_DELTA`); high-resolution wheels send fractions that accumulate.
 pub const WHEEL_NOTCH: i32 = 120;
 
+/// View > Icon size choices, as percentages of the desktop icon size.
+pub const PRESETS: [(&str, u32); 4] = [("Small", 75), ("Medium", 100), ("Large", 150), ("Extra large", 200)];
+
+/// Resolve one of four consecutive menu command ids to its zoom percentage.
+pub fn preset_percent(command: u32, first: u32) -> Option<u32> {
+    command.checked_sub(first).and_then(|index| PRESETS.get(index as usize)).map(|&(_, percent)| percent)
+}
+
 /// Effective zoom in percent of a stored value: `None` is 100; a hand-edited value is clamped to the
 /// range, so a stored 5 or 9000 cannot produce an unusable Corral.
 pub fn percent(stored: Option<u16>) -> u32 {

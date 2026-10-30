@@ -76,6 +76,8 @@ pub struct Frame {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Caption {
     SaveFailed,
+    /// The Corral this window talks to is a preview on the real settings: it never stores colours.
+    PreviewOnly,
     /// Title of the Corral that disappeared while it was the scope.
     TargetRemoved(String),
 }
@@ -84,6 +86,7 @@ impl Caption {
     pub fn text(&self) -> String {
         match self {
             Caption::SaveFailed => "Couldn't save. Your previous colors are back.".into(),
+            Caption::PreviewOnly => "This preview can't save colors. Run Corral on the desktop.".into(),
             Caption::TargetRemoved(title) => format!("\"{title}\" was removed. Showing all Corrals."),
         }
     }
@@ -347,7 +350,7 @@ impl ColorPage {
         }
         self.globals = globals;
         self.corrals = corrals;
-        if self.caption == Some(Caption::SaveFailed) {
+        if matches!(self.caption, Some(Caption::SaveFailed | Caption::PreviewOnly)) {
             self.caption = None;
         }
         Ok(())
@@ -375,10 +378,10 @@ impl ColorPage {
         }
     }
 
-    /// An asynchronous save failed: reload what is stored and show the error caption.
-    pub fn save_failed(&mut self, globals: Globals, corrals: Vec<CorralInfo>) {
+    /// An asynchronous save failed (or a preview refused it): reload what is stored and show `caption`.
+    pub fn save_failed(&mut self, globals: Globals, corrals: Vec<CorralInfo>, caption: Caption) {
         self.reload(globals, corrals);
-        self.caption = Some(Caption::SaveFailed);
+        self.caption = Some(caption);
     }
 }
 

@@ -6,6 +6,11 @@ use crate::icon_metrics::{self as cells, CellInputs, CellMetrics, DesktopMetrics
 use super::{App, log};
 use crate::view_state::{View, ColumnKey, DetailsColumns};
 
+fn group_zoom_percent(groups: &[crate::model::Group], id: u64) -> u32 {
+    groups.iter().find(|g| g.id == id)
+        .map_or(crate::icon_zoom::DEFAULT, |g| crate::icon_zoom::percent(g.icon_zoom))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct HeaderCell { pub key: ColumnKey, pub rect: Rect }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,12 +382,9 @@ impl App {
         self.group_metrics_dpi(id)
     }
 
-    /// Icon zoom of an ordinary Corral in percent (`icon_zoom.rs`); 100 for Gates (their Explorer view
-    /// zooms itself) and unknown groups.
+    /// Icon zoom of a drawn Corral or Gate in percent (`icon_zoom.rs`); 100 for unknown groups.
     pub(super) fn group_zoom_percent(&self, id: u64) -> u32 {
-        self.layout.groups.iter().find(|g| g.id == id)
-            .filter(|g| matches!(g.content, crate::model::GroupContent::Items { .. }))
-            .map_or(crate::icon_zoom::DEFAULT, |g| crate::icon_zoom::percent(g.icon_zoom))
+        group_zoom_percent(&self.layout.groups, id)
     }
 
     /// Icon size of Corral `id` at `dpi` in device pixels.
@@ -453,6 +455,21 @@ mod win32 {
 mod tests {
     use super::*;
     use crate::icon_metrics::{cell_metrics, CellInputs};
+
+    #[test]
+    fn drawn_gate_and_corral_cells_use_their_own_zoom() {
+        use crate::model::{GroupContent, Layout};
+        let mut layout = Layout::new();
+        let corral = layout.add_group("QA".into(), String::new(), Rect::default(), GroupContent::Items { items: Vec::new() });
+        let gate = layout.add_group("Gate".into(), String::new(), Rect::default(), GroupContent::Portal { path: "scratch".into() });
+        layout.set_icon_zoom(corral, Some(75));
+        for zoom in [None, Some(75), Some(150), Some(200)] {
+            layout.set_icon_zoom(gate, zoom);
+            assert_eq!(group_zoom_percent(&layout.groups, gate), crate::icon_zoom::percent(zoom));
+            assert_eq!(group_zoom_percent(&layout.groups, corral), 75);
+        }
+        assert_eq!(group_zoom_percent(&layout.groups, u64::MAX), 100);
+    }
 
     fn grid(dpi: u32, body: Rect, scroll: i32) -> Grid {
         let m = cell_metrics(&CellInputs { dpi, zoom_pct: 100, windows_spacing_dip: Some((75.0, 75.0)), desktop_icon_dip: Some(48.0), match_desktop: true });

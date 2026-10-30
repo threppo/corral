@@ -991,6 +991,10 @@ impl App {
                 let zone = super::input::group_hit_zone(geo, group, corner, self.layout.desktop_locked, &[]);
                 zone.horizontal() && zone.vertical()
             }),
+            resize_right: group.roll == RollState::Expanded && super::input::group_hit_zone(
+                geo, group, (geo.union.right - 1, geo.union.top + geo.union.height() / 2),
+                self.layout.desktop_locked, &[],
+            ).intersects(crate::snap::EdgeZone::RIGHT),
             input: self.groups.iter().find(|g| g.id == id).map_or(owner, |g| g.hwnd),
             hide_mode: self.settings.scrollbar_mode == 1,
             opacity: self.qh_group_alpha(id),

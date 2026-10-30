@@ -29,7 +29,7 @@ use super::{
 };
 use crate::color_state::{
     self, ColorEdit, TintMode,
-    page::{ColorPage, Commit, CorralInfo, Ended, Field as ColorField, Scope, Step, Throttle},
+    page::{Caption, ColorPage, Commit, CorralInfo, Ended, Field as ColorField, Scope, Step, Throttle},
 };
 use crate::render::{RectF, Rgba, Surface};
 use crate::settings::{self, Field, Settings};
@@ -168,6 +168,7 @@ impl ColorSender {
                     // The engine refused it (target gone, preview instance, queue full): nothing
                     // was stored, the page puts the stored look back.
                     LiveOutcome::Rejected => post(status::ENGINE_SAVE_FAILED),
+                    LiveOutcome::PreviewOnly => post(status::PREVIEW_ONLY),
                     LiveOutcome::Unavailable => {
                         // Quiet asynchronous file fallback: engine remains the sole layout writer.
                         // Serialize our own page saves with the worker so neither loses protocol state.
@@ -1193,13 +1194,13 @@ fn restore_shared_colors(settings: &mut Settings, stored: &Settings) {
 }
 
 /// A save did not go through: show what is stored and the error caption (colour-state-spec 3.4).
-fn caption_failed(st: &mut State, hwnd: HWND) {
+fn caption_failed(st: &mut State, hwnd: HWND, caption: Caption) {
     // `send_commit` copied the failed shared colours into this window's settings; put the stored
     // ones back before anything saves them.
     let disk = settings::load_with_backup(&st.path);
     restore_shared_colors(&mut st.settings, &disk);
     let (globals, corrals) = read_color_data(st);
-    st.page.save_failed(globals, corrals);
+    st.page.save_failed(globals, corrals, caption);
     sync_look_state(st);
     invalidate(hwnd);
 }
@@ -1232,7 +1233,7 @@ fn reset_appearance(hwnd: HWND) {
         }
         Err(_) => {
             if let Some(st) = state_mut(hwnd) {
-                caption_failed(st, hwnd);
+                caption_failed(st, hwnd, Caption::SaveFailed);
             }
         }
     }
@@ -1261,7 +1262,7 @@ fn look_action(hwnd: HWND, action: LookAction, point: (i32, i32)) {
                     }
                     Err(_) => {
                         if let Some(st) = state_mut(hwnd) {
-                            caption_failed(st, hwnd);
+                            caption_failed(st, hwnd, Caption::SaveFailed);
                         }
                     }
                 }
@@ -3723,7 +3724,11 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 // colour-state-spec 3.4: the previous colors are back, with a caption.
                 status::FILE_SAVE_FAILED | status::ENGINE_SAVE_FAILED => {
                     st.notice.clear();
-                    caption_failed(st, hwnd);
+                    caption_failed(st, hwnd, Caption::SaveFailed);
+                }
+                status::PREVIEW_ONLY => {
+                    st.notice.clear();
+                    caption_failed(st, hwnd, Caption::PreviewOnly);
                 }
                 _ => {}
             }

@@ -8,7 +8,7 @@ use windows::{
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Input::KeyboardAndMouse::{
-                GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
+                GetCapture, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
                 TrackMouseEvent, VK_CONTROL, VK_MENU,
             },
             WindowsAndMessaging::*,
@@ -575,6 +575,8 @@ pub struct Params {
     pub parent: [i32; 4],
     /// The Corral resizes from its top-right / bottom-right corner (not locked, edge not docked).
     pub resize_corners: [bool; 2],
+    /// The expanded Corral reports a RIGHT resize zone (not locked).
+    pub resize_right: bool,
     pub input: HWND,
 }
 #[derive(Clone, Copy, Default)]
@@ -833,6 +835,7 @@ impl Bar {
             hide_mode: true,
             parent: [0; 4],
             resize_corners: [false; 2],
+            resize_right: false,
             input: owner,
         };
         let state = Rc::new(RefCell::new(State {
@@ -1180,12 +1183,21 @@ impl State {
 fn lookup(hwnd: HWND) -> Option<Rc<RefCell<State>>> {
     STATES.with(|s| s.borrow().get(&(hwnd.0 as isize)).cloned())
 }
-/// The Corral's right resize corners beat the lane (snap::resize_zone: corner beats edge band); the bar passes
-/// those points to the Corral window under it (same thread, HTTRANSPARENT). `parent` includes the title strip.
-fn in_resize_corner(screen: (i32, i32), parent: [i32; 4], dpi: u32, corners: [bool; 2]) -> bool {
-    let corner = crate::icon_metrics::dip_to_px(crate::snap::CORNER_DIP, dpi);
-    parent[2] > parent[0] && screen.0 >= parent[2] - corner
-        && ((corners[1] && screen.1 >= parent[3] - corner) || (corners[0] && screen.1 < parent[1] + corner))
+/// Pass the enabled right resize zones to the Corral beneath this same-thread popup.
+/// The widened thumb and captured input stay with the bar. All rectangles are in screen pixels.
+fn in_resize_zone(screen: (i32, i32), parent: [i32; 4], dpi: u32, corners: [bool; 2],
+    right: bool, thumb: Option<PixelRect>, captured: bool) -> bool {
+    if captured || thumb.is_some_and(|r| r.contains(screen.0, screen.1)) {
+        return false;
+    }
+    // Reuse the actual resize geometry, including its rounding, size caps and pixel floors.
+    let zone = crate::snap::resize_zone(
+        crate::geometry::Rect::new(parent[0], parent[1], parent[2], parent[3]),
+        crate::geometry::Rect::default(), screen,
+        &crate::snap::ZoneCtx { dpi, locked: false, folded: false,
+            no_top: !corners[0], no_bottom: !corners[1], buttons: &[] },
+    );
+    zone.intersects(crate::snap::EdgeZone::RIGHT) && (right || zone.vertical())
 }
 
 unsafe extern "system" fn bar_proc(
@@ -1213,7 +1225,15 @@ unsafe extern "system" fn bar_proc(
     match msg {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         // `point` is in screen pixels here.
-        WM_NCHITTEST => return LRESULT(if in_resize_corner(point, s.p.parent, s.p.dpi, s.p.resize_corners) { HTTRANSPARENT as isize } else { HTCLIENT as isize }),
+        WM_NCHITTEST => {
+            let thumb = s.layout_at(s.scroll.offset, 1.0).map(|bar| PixelRect {
+                left: bar.thumb.left + s.p.x, top: bar.thumb.top + s.p.y,
+                right: bar.thumb.right + s.p.x, bottom: bar.thumb.bottom + s.p.y,
+            });
+            let pass = in_resize_zone(point, s.p.parent, s.p.dpi, s.p.resize_corners,
+                s.p.resize_right, thumb, unsafe { GetCapture() } == hwnd);
+            return LRESULT(if pass { HTTRANSPARENT as isize } else { HTCLIENT as isize });
+        }
         WM_RBUTTONDOWN | WM_RBUTTONUP | WM_CONTEXTMENU | WM_RBUTTONDBLCLK => return LRESULT(0),
         WM_MOUSEMOVE => {
             s.pointer = point;
@@ -1250,7 +1270,8 @@ unsafe extern "system" fn bar_proc(
             s.scroll.tick(now);
             s.scroll.target = s.scroll.offset;
             s.scroll.motion = Tween::fixed(s.scroll.offset);
-            if let Some(bar) = s.layout() {
+            // Match the hit-test exemption even while widening is still animating.
+            if let Some(bar) = s.layout_at(s.scroll.offset, 1.0) {
                 unsafe {
                     SetCapture(hwnd);
                 }
@@ -1363,12 +1384,62 @@ mod tests {
             let c = crate::icon_metrics::dip_to_px(crate::snap::CORNER_DIP, dpi);
             let parent = [100, 50, 500, 450];
             let both = [true; 2];
-            assert!(in_resize_corner((499, 449), parent, dpi, both) && in_resize_corner((500 - c, 450 - c), parent, dpi, both));
-            assert!(in_resize_corner((499, 50), parent, dpi, both));
-            assert!(!in_resize_corner((499 - c, 449), parent, dpi, both), "left of the corner");
-            assert!(!in_resize_corner((499, 449 - c), parent, dpi, both) && !in_resize_corner((499, 250), parent, dpi, both), "the lane");
-            assert!(!in_resize_corner((499, 449), parent, dpi, [true, false]) && !in_resize_corner((499, 50), parent, dpi, [false, true]),
+            let hit = |p, corners| in_resize_zone(p, parent, dpi, corners, false, None, false);
+            assert!(hit((499, 449), both) && hit((500 - c, 450 - c), both));
+            assert!(hit((499, 50), both));
+            assert!(!hit((499 - c, 449), both), "left of the corner");
+            assert!(!hit((499, 449 - c), both) && !hit((499, 250), both), "no right-edge flag");
+            assert!(!hit((499, 449), [true, false]) && !hit((499, 50), [false, true]),
                 "locked or docked: no corner");
+            assert!(!hit((500, 449), both) && !hit((499, 450), both) && !hit((499, 49), both),
+                "outside the Corral");
+        }
+    }
+    #[test]
+    fn right_band_passes_through_but_widened_thumb_and_capture_keep_the_lane() {
+        for dpi in [96, 120, 144, 240] {
+            for thin in [false, true] {
+                for offset in [0.0, 370.0, 1200.0] {
+                    let bar = layout_widen(400.0, 1600.0, offset, dpi, thin, 6.0, 1.0).unwrap();
+                    let h = px(400.0, dpi);
+                    let parent = [-500, -300, -500 + px(320.0, dpi), -300 + h + px(32.0, dpi)];
+                    let origin = (parent[2] - bar.lane, parent[3] - h);
+                    let thumb = PixelRect { left: origin.0 + bar.thumb.left, top: origin.1 + bar.thumb.top,
+                        right: origin.0 + bar.thumb.right, bottom: origin.1 + bar.thumb.bottom };
+                    let band_left = parent[2] - crate::icon_metrics::dip_to_px(crate::snap::BAND_DIP, dpi);
+                    // Check every lane pixel: track/gap outside the band is still the scrollbar's,
+                    // and the thumb exclusion follows its current position, including both endpoints.
+                    for y in origin.1..parent[3] {
+                        for x in origin.0..parent[2] {
+                            let hit = |corners, right, capture| in_resize_zone((x, y), parent, dpi, corners,
+                                right, Some(thumb), capture);
+                            assert_eq!(hit([false; 2], true, false), x >= band_left && !thumb.contains(x, y),
+                                "dpi={dpi} thin={thin} offset={offset} at {x},{y}");
+                            assert!(!hit([false; 2], false, false), "locked, folded or no RIGHT zone");
+                            assert!(!hit([true; 2], true, true), "capture keeps input even off the thumb");
+                        }
+                    }
+                    let rest = bar_layout(400.0, 1600.0, offset, dpi, thin, 6.0).unwrap();
+                    let x = thumb.left.max(band_left);
+                    assert!(x < origin.0 + rest.thumb.left, "exercise the extra widened hit width");
+                    assert!(!in_resize_zone((x, thumb.top), parent, dpi, [true; 2], true, Some(thumb), false),
+                        "thumb beats edge and corner even before it has widened visually");
+                    assert!(in_resize_zone((thumb.right, thumb.top), parent, dpi, [true; 2], true, Some(thumb), false),
+                        "the right gap remains available to resize beside the thumb");
+                }
+            }
+        }
+    }
+    #[test]
+    fn right_band_matches_resize_zone_size_caps_and_pixel_floor() {
+        for dpi in [24, 96, 120, 144, 240] {
+            for (w, h) in [(240, 200), (30, 21), (30, 9)] {
+                let parent = [100, 50, 100 + w, 50 + h];
+                let band = crate::icon_metrics::dip_to_px(crate::snap::BAND_DIP, dpi).min(w.min(h) / 3).max(4);
+                let y = parent[1] + h / 2;
+                assert!(in_resize_zone((parent[2] - band, y), parent, dpi, [false; 2], true, None, false));
+                assert!(!in_resize_zone((parent[2] - band - 1, y), parent, dpi, [false; 2], true, None, false));
+            }
         }
     }
     fn close(a: f64, b: f64) {
