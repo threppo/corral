@@ -13,6 +13,10 @@ Corral keeps the desktop tidy with a set of building blocks you arrange yourself
 
 - **Corrals**: movable, resizable containers that hold desktop items.
 - **Folder Gates**: a corral that shows a folder and lets you browse it without opening a window.
+- **Views**: every Corral and Gate shows its items as Icons, List or Details (sortable, resizable
+  columns: Name, Size, Type, Date modified).
+- **Tabs**: stack several Corrals and Gates in one place and switch between them; with the Rounded
+  style each tab gets its own rounded title bar with its own menu, close and Up buttons.
 - **Camouflage**: icons take on the colours of the wallpaper behind them, for a quieter desktop.
 - **Round-up**: rules that send new desktop items to the right corral, with a preview before sorting.
 - **Saved desk setups**: corral placements remembered per monitor setup and restored when it returns.
@@ -102,7 +106,9 @@ desktop. Start it with `--desktop` to organise the real desktop.
 
 ## Known issues
 
-- List and Details views are not available yet; corrals show icons only.
+- List and Details views and the Rounded tab bars have been tested in the preview window only,
+  not yet on the real desktop or on a high-DPI monitor.
+- Typing a name does not select the matching item yet.
 - In the v0.1.0-alpha download, the Welcome page in Settings says to click a Corral's title to
   rename it, which does not work. Right-click the title and choose **Rename Corral** instead. The
   tip is corrected in the source.
