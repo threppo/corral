@@ -5,6 +5,128 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum View {
+    #[default]
+    Icons,
+    List,
+    Details,
+}
+impl View {
+    pub fn from_key(key: Option<&str>) -> Self {
+        match key { Some("list") => Self::List, Some("details") => Self::Details, _ => Self::Icons }
+    }
+    pub fn from_mode(mode: i32) -> Self {
+        match mode { 2 | 3 => Self::List, 4 | 8 => Self::Details, _ => Self::Icons }
+    }
+    pub fn mode(self) -> i32 {
+        match self { Self::Icons => 1, Self::List => 3, Self::Details => 4 }
+    }
+}
+
+/// A user view command patches only this folder's mode. Legacy sizes, flags, columns and unknown
+/// fields survive, including unset entries; opening/inheriting a folder never calls this.
+pub fn set_view(store: &mut ViewStates, folder: &str, view: View) {
+    let existing = store.iter().filter(|(p, _)| folder_key(p) == folder_key(folder))
+        .max_by_key(|(_, v)| (v.set, group_count(v), v.order)).map(|(p, _)| p.clone());
+    let key = existing.unwrap_or_else(|| folder_key(folder));
+    let entry = store.entry(key).or_default();
+    let mut original = entry.original.take().filter(|v| matches!(v, StoredJson::Object(_)))
+        .unwrap_or_else(|| StoredJson::from_value(entry.raw.clone().filter(Value::is_object).unwrap_or_else(|| json!({}))));
+    original.put("view_mode", json!(view.mode()));
+    original.put("set", json!(true));
+    entry.raw = serde_json::to_value(&original).ok();
+    entry.original = Some(original);
+    entry.view_mode = view.mode();
+    entry.set = true;
+}
+
+/// Drawn columns retain raw entries so newer and legacy Shell columns survive edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColumnKey { Name, Size, Type, DateModified }
+impl ColumnKey {
+    pub fn key(self) -> &'static str { match self { Self::Name => "name", Self::Size => "size", Self::Type => "type", Self::DateModified => "date_modified" } }
+    pub fn label(self) -> &'static str { match self { Self::Name => "Name", Self::Size => "Size", Self::Type => "Type", Self::DateModified => "Date modified" } }
+    pub fn parse(s: &str) -> Option<Self> { match s { "size" => Some(Self::Size), "type" => Some(Self::Type), "date_modified" => Some(Self::DateModified), _ => None } }
+    pub fn sort(self) -> i32 { match self { Self::Name => 1, Self::Size => 2, Self::Type => 3, Self::DateModified => 4 } }
+    pub fn method(self) -> u32 { match self { Self::Name => crate::sorting::METHOD_NAME, Self::Size => crate::sorting::METHOD_SIZE, Self::Type => crate::sorting::METHOD_TYPE, Self::DateModified => crate::sorting::METHOD_MODIFIED } }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DetailsColumns(pub Vec<Value>);
+impl Default for DetailsColumns { fn default() -> Self { Self(vec![json!({"key":"size", "width":80})]) } }
+impl DetailsColumns {
+    pub fn parse(value: Option<&Value>) -> Self { value.and_then(Value::as_array).map(|a| Self(a.clone())).unwrap_or_default() }
+    pub fn visible(&self) -> Vec<(ColumnKey, i32)> {
+        let mut out = Vec::new();
+        for v in &self.0 {
+            let Some(key) = v.get("key").and_then(Value::as_str).and_then(ColumnKey::parse) else { continue };
+            if out.iter().any(|(k, _)| *k == key) { continue; }
+            let width = v.get("width").and_then(Value::as_i64).unwrap_or(80).clamp(40, i32::MAX as i64) as i32;
+            out.push((key, width));
+        }
+        out
+    }
+    pub fn contains(&self, key: ColumnKey) -> bool { self.visible().iter().any(|(k, _)| *k == key) }
+    pub fn resize(&mut self, key: ColumnKey, width: i32) { for v in &mut self.0 { if v.get("key").and_then(Value::as_str) == Some(key.key()) { v["width"] = json!(width.max(40)); } } }
+    pub fn toggle(&mut self, key: ColumnKey) {
+        if self.contains(key) { self.0.retain(|v| v.get("key").and_then(Value::as_str) != Some(key.key())); }
+        else { self.0.push(json!({"key":key.key(),"width":if key == ColumnKey::DateModified {160} else {80}})); }
+    }
+    pub fn reset(&mut self) {
+        self.0.retain(|v| v.get("key").and_then(Value::as_str).and_then(ColumnKey::parse).is_none());
+    }
+}
+pub fn details_columns(folder: &str, store: &ViewStates, inherit: bool) -> DetailsColumns {
+    let mut path = Some(folder_key(folder));
+    while let Some(p) = path {
+        if let Some(v) = stored(store, &p).filter(|v| v.set) {
+            if let Some(raw) = v.raw.as_ref().and_then(|v| v.get("col_info")).filter(|v| v.is_array()) {
+                return DetailsColumns::parse(Some(raw));
+            }
+        }
+        path = if inherit { parent_key(&p) } else { None };
+    }
+    DetailsColumns::default()
+}
+/// Patch exactly one folder, retaining mode, sort, unknown fields and case aliases.
+pub fn set_details_columns(store: &mut ViewStates, folder: &str, columns: &DetailsColumns) {
+    patch_details_columns(store, folder, Some(columns));
+}
+/// Reset only this folder's drawn columns; opaque Shell/newer entries survive.
+pub fn reset_details_columns(store: &mut ViewStates, folder: &str) {
+    patch_details_columns(store, folder, None);
+}
+fn patch_details_columns(store: &mut ViewStates, folder: &str, columns: Option<&DetailsColumns>) {
+    let existing = store.iter().filter(|(p, _)| folder_key(p) == folder_key(folder))
+        .max_by_key(|(_, v)| (v.set, group_count(v), v.order)).map(|(p, _)| p.clone());
+    let entry = store.entry(existing.unwrap_or_else(|| folder_key(folder))).or_default();
+    let mut original = entry.original.take().filter(|v| matches!(v, StoredJson::Object(_)))
+        .unwrap_or_else(|| StoredJson::from_value(entry.raw.clone().filter(Value::is_object).unwrap_or_else(|| json!({}))));
+    let mut opaque = DetailsColumns(entry.raw.as_ref().and_then(|v| v.get("col_info"))
+        .and_then(Value::as_array).cloned().unwrap_or_default());
+    opaque.reset();
+    let mut updated = columns.cloned().unwrap_or_else(|| opaque.clone());
+    for (i, value) in opaque.0.iter().enumerate() {
+        if updated.0.iter().filter(|v| *v == value).count() < opaque.0[..=i].iter().filter(|v| *v == value).count() {
+            updated.0.push(value.clone());
+        }
+    }
+    // Like a sort patch, the first edit must not activate ignored style/sort groups.
+    // The caller archives the original entry before this explicit write.
+    if !entry.set {
+        entry.view_mode = 0;
+        entry.icon_size = 0;
+        entry.sort_mode = 0;
+        for field in ["view_mode", "icon_size", "sort_mode"] { original.remove(field); }
+    }
+    if columns.is_none() && updated.0.is_empty() { original.remove("col_info"); }
+    else { original.put("col_info", json!(updated.0)); }
+    original.put("set", json!(true));
+    entry.raw = serde_json::to_value(&original).ok();
+    entry.original = Some(original);
+    entry.set = true;
+}
+
 pub const FLAG_NON_ICON: u32 = 0x01;
 pub const FLAG_HIDE_HEADER: u32 = 0x02;
 pub const FLAG_CUSTOM_SIZE: u32 = 0x10;
@@ -632,6 +754,49 @@ pub fn apply_patch(store: &mut ViewStates, folder: &str, patch: Patch, ctx: Cont
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn corral_keys_and_gate_modes_map_tolerantly_both_ways() {
+        for key in [None, Some("icons"), Some("future"), Some("List")] { assert_eq!(View::from_key(key), View::Icons); }
+        assert_eq!(View::from_key(Some("list")), View::List);
+        assert_eq!(View::from_key(Some("details")), View::Details);
+        for mode in [0, 1, 5, 6, 7, 99, -1] { assert_eq!(View::from_mode(mode), View::Icons); }
+        for mode in [2, 3] { assert_eq!(View::from_mode(mode), View::List); }
+        for mode in [4, 8] { assert_eq!(View::from_mode(mode), View::Details); }
+        for (view, mode) in [(View::Icons, 1), (View::List, 3), (View::Details, 4)] {
+            assert_eq!(view.mode(), mode);
+            assert_eq!(View::from_mode(mode), view);
+        }
+    }
+
+    #[test]
+    fn user_view_change_preserves_every_other_field_and_folder() {
+        for set in [true, false] {
+            let before = json!({r"C:\QA": {"view_mode": 8, "set": set, "icon_size": 100,
+                "view_flags": 1234567, "sort_mode": -4, "col_info": [{"future": "opaque"}], "unknown": [1, {"x": true}]},
+                r"C:\other": {"view_mode": 2, "set": true, "unknown": 42}});
+            let mut states: ViewStates = serde_json::from_value(before.clone()).unwrap();
+            set_view(&mut states, r"c:\qa\", View::List);
+            let mut expected = before;
+            expected[r"C:\QA"]["view_mode"] = json!(3);
+            expected[r"C:\QA"]["set"] = json!(true);
+            assert_eq!(serde_json::to_value(&states).unwrap(), expected);
+            assert_eq!(View::from_mode(resolve(r"C:\QA\child", &states, true).style.mode), View::List);
+            assert_eq!(View::from_mode(resolve(r"C:\QA\child", &states, false).style.mode), View::Icons);
+        }
+    }
+
+    #[test]
+    fn changing_inherited_view_creates_only_the_child_entry() {
+        let mut states: ViewStates = serde_json::from_value(json!({r"C:\QA": {"view_mode": 8, "set": true, "unknown": 12}})).unwrap();
+        let parent = serde_json::to_value(stored(&states, r"C:\QA").unwrap()).unwrap();
+        let baseline = serde_json::to_value(&states).unwrap();
+        assert_eq!(View::from_mode(resolve(r"C:\QA\child", &states, true).style.mode), View::Details);
+        assert_eq!(serde_json::to_value(&states).unwrap(), baseline, "resolving never saves");
+        set_view(&mut states, r"C:\QA\child", View::Icons);
+        assert_eq!(states.len(), 2);
+        assert_eq!(serde_json::to_value(stored(&states, r"C:\QA").unwrap()).unwrap(), parent);
+        assert_eq!(View::from_mode(resolve(r"C:\QA\child", &states, true).style.mode), View::Icons);
+    }
     fn ctx(_dpi: u32) -> Context {
         Context {
             desktop_icon_size: 32,
@@ -1018,5 +1183,126 @@ mod tests {
         assert_eq!(layout.view_states.len(), 1);
         assert_eq!(resolve(r"C:\X", &layout.view_states, false).sort, -1);
         assert_eq!(serde_json::to_value(&layout.view_unparsed[r"c:\X"]).unwrap(), loser);
+    }
+}
+
+#[cfg(test)]
+mod details_tests {
+    use super::*;
+    #[test]
+    fn legacy_only_gate_columns_survive_toggle_resize_and_reload() {
+        for raw in [json!([{"fmtid":"legacy", "pid":2, "width":99, "extra":{"keep":true}}]),
+            json!([false, 42, null, {"unknown":[1,2]}, {"key":"future", "extra":true}])] {
+            let mut store: ViewStates = serde_json::from_value(json!({"folder":{"set":true,"view_mode":4,"col_info":raw,"extra":12}})).unwrap();
+            let mut columns = details_columns("folder", &store, true);
+            assert_eq!(columns.0, raw.as_array().unwrap().clone());
+            assert!(columns.visible().is_empty(), "opaque entries are never displayed");
+            columns.toggle(ColumnKey::Size);
+            set_details_columns(&mut store, "folder", &columns);
+            store = serde_json::from_value(serde_json::to_value(&store).unwrap()).unwrap();
+            let mut columns = details_columns("folder", &store, true);
+            columns.resize(ColumnKey::Size, 123);
+            set_details_columns(&mut store, "folder", &columns);
+            let saved = serde_json::to_value(&store).unwrap();
+            assert_eq!(&saved["folder"]["col_info"].as_array().unwrap()[..raw.as_array().unwrap().len()], raw.as_array().unwrap());
+            assert_eq!(saved["folder"]["extra"], 12);
+            let reload: ViewStates = serde_json::from_value(saved).unwrap();
+            assert_eq!(details_columns("folder", &reload, true).visible(), vec![(ColumnKey::Size,123)]);
+        }
+    }
+    #[test]
+    fn column_patch_does_not_activate_unset_view_or_sort() {
+        let ignored = json!({"set":false,"view_mode":1,"icon_size":96,"sort_mode":-2,
+            "col_info":[{"key":"type","width":90},{"legacy":true},{"legacy":true}],"view_flags":128,"extra":{"keep":1}});
+        let mut layout = crate::model::Layout::new();
+        layout.view_states = serde_json::from_value(json!({r"C:\parent":{"set":true,"view_mode":4,"sort_mode":-3},
+            r"C:\parent\child":ignored})).unwrap();
+        let mut columns = details_columns(r"C:\parent\child", &layout.view_states, true);
+        columns.resize(ColumnKey::Size, 111);
+        layout.view_unparsed.extend(unparsed_for_folder(&layout.view_states, r"C:\parent\child"));
+        set_details_columns(&mut layout.view_states, r"C:\parent\child", &columns);
+        let reload: crate::model::Layout = serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
+        let child = serde_json::to_value(stored(&reload.view_states, r"C:\parent\child").unwrap()).unwrap();
+        for field in ["view_mode", "icon_size", "sort_mode"] { assert!(child.get(field).is_none()); }
+        assert_eq!(child["set"], true);
+        assert_eq!(child["view_flags"], 128);
+        assert_eq!(child["extra"], ignored["extra"]);
+        assert_eq!(child["col_info"], json!([{"key":"size","width":111},{"legacy":true},{"legacy":true}]));
+        assert_eq!(serde_json::to_value(&reload.view_unparsed[r"C:\parent\child"]).unwrap(), ignored);
+        let resolved = resolve_view(r"C:\parent\child", &reload.view_states, true, Context {desktop_icon_size:32});
+        assert_eq!(resolved.style.mode, 4);
+        assert_eq!(resolved.sort, -3);
+    }
+    #[test]
+    fn gate_reset_removes_drawn_columns_and_preserves_opaque_entries() {
+        for raw in [json!([{"key":"size","width":123},{"key":"type","extra":true}]),
+            json!([{"key":"size","width":123},{"fmtid":"legacy","pid":2,"extra":true},false,{"key":"future","x":1}])] {
+            let mut store: ViewStates = serde_json::from_value(json!({"folder":{"set":true,"view_mode":4,"sort_mode":-2,"col_info":raw,"extra":42},
+                "other":{"set":true,"col_info":[{"key":"size","width":99}]}})).unwrap();
+            let before = serde_json::to_value(&store).unwrap();
+            reset_details_columns(&mut store, "folder");
+            let reload: ViewStates = serde_json::from_value(serde_json::to_value(&store).unwrap()).unwrap();
+            let saved = serde_json::to_value(&reload).unwrap();
+            let mut expected = DetailsColumns::parse(Some(&raw));
+            expected.reset();
+            if expected.0.is_empty() {
+                assert!(saved["folder"].get("col_info").is_none());
+                assert_eq!(details_columns("folder", &reload, false), DetailsColumns::default());
+            } else { assert_eq!(saved["folder"]["col_info"], json!(expected.0)); }
+            assert_eq!(saved["folder"]["view_mode"], 4);
+            assert_eq!(saved["folder"]["sort_mode"], -2);
+            assert_eq!(saved["folder"]["extra"], 42);
+            assert_eq!(saved["other"], before["other"]);
+        }
+    }
+    #[test]
+    fn tolerant_columns_preserve_unknown_entries_through_resize_toggle_reset_and_reload() {
+        let raw = json!([{"key":"size","width":2,"extra":true}, {"key":"future","width":75,"other":[1]}, false, {"key":"type","width":"bad"}, {"key":"size","width":900}]);
+        let mut c = DetailsColumns::parse(Some(&raw));
+        assert_eq!(c.visible(), vec![(ColumnKey::Size,40),(ColumnKey::Type,80)]);
+        c.resize(ColumnKey::Size,99);
+        assert_eq!(c.0[0]["extra"], true);
+        let unknown = c.0[1].clone();
+        c.toggle(ColumnKey::Type);
+        c.toggle(ColumnKey::DateModified);
+        assert_eq!(DetailsColumns::parse(Some(&json!(c.0))),c);
+        c.reset();
+        assert!(c.visible().is_empty());
+        assert_eq!(c.0[0], unknown);
+        assert_eq!(c.0[1], false);
+        assert_eq!(DetailsColumns::parse(None), DetailsColumns::default());
+        assert_eq!(DetailsColumns::parse(Some(&json!({}))), DetailsColumns::default());
+        assert!(DetailsColumns::parse(Some(&json!([]))).visible().is_empty());
+    }
+    #[test]
+    fn gate_col_info_inherits_and_writes_only_current_folder() {
+        let mut store: ViewStates = serde_json::from_value(json!({"c:\\parent":{"set":true,"view_mode":4,"sort_mode":-3,"col_info":[{"key":"future","width":50},{"key":"type","width":90}]},"c:\\parent\\child":{"set":true,"view_mode":3,"sort_mode":2,"extra":123},"other":[false]})).unwrap();
+        let before = serde_json::to_value(&store).unwrap();
+        let mut c = details_columns(r"C:\parent\child", &store, true);
+        assert_eq!(c.visible(),vec![(ColumnKey::Type,90)]);
+        c.resize(ColumnKey::Type,105);
+        set_details_columns(&mut store,r"C:\parent\child",&c);
+        let after = serde_json::to_value(&store).unwrap();
+        assert_eq!(after[r"c:\parent"],before[r"c:\parent"]);
+        assert_eq!(after["other"],before["other"]);
+        assert_eq!(after[r"c:\parent\child"]["view_mode"],3);
+        assert_eq!(after[r"c:\parent\child"]["sort_mode"],2);
+        assert_eq!(after[r"c:\parent\child"]["extra"],123);
+        let reload: ViewStates = serde_json::from_value(after).unwrap();
+        assert_eq!(details_columns(r"c:\parent\child",&reload,true), c);
+        assert_eq!(details_columns(r"c:\parent\child\deep",&reload,true), c);
+        assert_eq!(details_columns(r"c:\parent\child\deep",&reload,false), DetailsColumns::default());
+    }
+    #[test]
+    fn corral_columns_round_trip_and_no_view_change_changes_membership() {
+        let mut layout = crate::model::Layout::new();
+        let id = layout.add_group("test".into(),"monitor".into(),crate::geometry::Rect::new(0,0,300,200),crate::model::GroupContent::Items{items:vec!["file".into()]});
+        assert_eq!(layout.groups[0].columns(),DetailsColumns::default());
+        let c = DetailsColumns::parse(Some(&json!([{"key":"size","width":70},{"key":"future","width":110,"keep":true}])));
+        layout.group_mut(id).unwrap().set_columns(&c);
+        layout.group_mut(id).unwrap().set_view(View::Details);
+        let reload: crate::model::Layout = serde_json::from_value(serde_json::to_value(&layout).unwrap()).unwrap();
+        assert_eq!(reload.groups[0].columns(),c);
+        assert_eq!(reload.groups[0].content,layout.groups[0].content);
     }
 }

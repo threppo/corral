@@ -3,6 +3,7 @@
 
 use crate::creation::{CancelReason, DrawButton};
 use crate::geometry::{Rect, to_dip, to_px};
+use crate::group_paint::SegmentPart;
 use crate::model::{GroupContent, RollState};
 use crate::motion::{self, Tween};
 use crate::shell;
@@ -128,6 +129,8 @@ impl App {
     pub(super) fn update_strip_hover(&mut self, index: usize, point: Option<(i32, i32)>) {
         use windows::Win32::UI::Input::KeyboardAndMouse::{TRACKMOUSEEVENT, TrackMouseEvent, TME_LEAVE};
         let gw = &self.groups[index];
+        let segment_hot = point.and_then(|p| self.segment_hit(index, p));
+        let segment_changed = segment_hot != gw.segment_hot;
         let (strip_hot, hot) = match point {
             Some((x, y)) => {
                 let hot = if gw.menu_glyph.contains(x, y) { Some(TitleButton::Menu) }
@@ -142,10 +145,16 @@ impl App {
             let mut track = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: gw.hwnd, dwHoverTime: 0 };
             unsafe { let _ = TrackMouseEvent(&mut track); }
         }
-        if (strip_hot, hot) != (gw.strip_hot, gw.hot_button) {
+        if segment_changed || (strip_hot, hot) != (gw.strip_hot, gw.hot_button) {
             let gw = &mut self.groups[index];
             gw.strip_hot = strip_hot;
             gw.hot_button = hot;
+            gw.segment_hot = segment_hot;
+            if let Some((member, _)) = segment_hot { gw.segment_hover.entry(member).or_insert(0.0); }
+            if segment_changed {
+                self.title_clock.get_or_insert_with(Instant::now);
+                unsafe { SetTimer(self.message_window, TIMER_TITLE_HOVER, 15, None); }
+            }
             self.render_group(index);
         }
     }
@@ -165,6 +174,7 @@ impl App {
                 if let Some(gw) = self.groups.iter_mut().find(|g| g.id == id) {
                     gw.strip_hot = false;
                     gw.hot_button = None;
+                    gw.segment_hot = None;
                 }
             }
         }
@@ -173,6 +183,16 @@ impl App {
         self.title_clock = Some(now);
         let hot = self.title_hot;
         let mut changed = Vec::new();
+        for gw in &mut self.groups {
+            for (member, level) in &mut gw.segment_hover {
+                let target = if hot == Some(gw.id) && gw.segment_hot.is_some_and(|(id, _)| id == *member) { 250.0 } else { 0.0 };
+                let duration = motion::duration(if target > *level { crate::group_paint::REVEAL_IN_MS } else { crate::group_paint::REVEAL_OUT_MS });
+                let next = if duration <= 0.0 { target } else if target > *level { (*level + elapsed * 250.0 / duration).min(target) }
+                    else { (*level - elapsed * 250.0 / duration).max(target) };
+                if next != *level { *level = next; if !changed.contains(&gw.id) { changed.push(gw.id); } }
+            }
+            gw.segment_hover.retain(|member, level| *level > 0.0 || gw.segment_hot.is_some_and(|(id, _)| id == *member));
+        }
         for (id, level) in self.title_hover.iter_mut() {
             let target = if Some(*id) == hot { 250.0 } else { 0.0 };
             // Shown over 120 ms, hidden over 200 ms (corral-painting-spec 2.4); 0 while animations are off.
@@ -182,7 +202,7 @@ impl App {
             } else if down <= 0.0 { target } else { (*level - elapsed * 250.0 / down).max(target) };
             if next != *level {
                 *level = next;
-                changed.push(*id);
+                if !changed.contains(id) { changed.push(*id); }
             }
         }
         self.title_hover.retain(|id, level| *level > 0.0 || Some(*id) == hot);
@@ -191,7 +211,7 @@ impl App {
                 self.render_group(i);
             }
         }
-        if self.title_hot.is_none() && self.title_hover.is_empty() {
+        if self.title_hot.is_none() && self.title_hover.is_empty() && self.groups.iter().all(|g| g.segment_hover.is_empty()) {
             self.title_clock = None;
             unsafe {
                 let _ = KillTimer(self.message_window, TIMER_TITLE_HOVER);
@@ -265,8 +285,9 @@ impl App {
             return None;
         }
         let dpi = self.group_dpi(group.id);
-        let slot = self.group_grid(group.id, dpi, body, group.scroll).slot_at(point)?;
-        self.group_members(group)
+        let members = self.group_members(group);
+        let slot = self.group_grid(group.id, dpi, body, group.scroll).hit_test(point, members.len())?;
+        members
             .get(slot)
             .map(|i| i.shell.parsing_name.clone())
             .filter(|n| !self.qh_name_hidden(n) && self.page_name_visible(n))
@@ -697,6 +718,41 @@ impl App {
     /// when the key reached a Corral, like Paste from its body menu).
     pub(super) fn handle_selection_key(&mut self, vk: u16, target: Option<u64>) -> Option<LRESULT> {
         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        if let Some(id) = target.filter(|id| self.group_view(*id) != crate::view_state::View::Icons) {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_SPACE};
+            if [VK_UP.0, VK_DOWN.0, VK_LEFT.0, VK_RIGHT.0, VK_HOME.0, VK_END.0, VK_PRIOR.0, VK_NEXT.0, VK_SPACE.0].contains(&vk) {
+                let g = self.layout.groups.iter().find(|g| g.id == id)?;
+                let geo = self.group_geometry(g);
+                let grid = self.group_grid(id, geo.dpi, geo.full_body, g.scroll);
+                let order = self.container_order(Some(id));
+                if order.is_empty() { return Some(LRESULT(0)); }
+                let focus = self.selection.focus.as_deref().and_then(|name| order.iter().position(|n| n.eq_ignore_ascii_case(name)));
+                let at = focus.unwrap_or(0);
+                use super::metrics::Nav;
+                let nav = if vk == VK_HOME.0 { Nav::First } else if vk == VK_END.0 { Nav::Last }
+                    else if vk == VK_UP.0 { Nav::Previous } else if vk == VK_DOWN.0 { Nav::Next }
+                    else if vk == VK_PRIOR.0 { Nav::PageUp } else if vk == VK_NEXT.0 { Nav::PageDown } else { Nav::Stay };
+                let slot = grid.key_slot(focus, nav, order.len())?;
+                let before = self.selected_keys();
+                let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) } < 0;
+                if vk == VK_SPACE.0 && ctrl {
+                    self.set_selected(&order[slot], !self.is_selected(&order[slot]));
+                } else if shift {
+                    if self.selection.anchor.is_none() { self.selection.anchor = Some(order[at].clone()); }
+                    let span = self.selection.anchor.as_deref().and_then(|anchor| selection::range(&order, anchor, &order[slot])).unwrap_or(&order[slot..=slot]).to_vec();
+                    if !ctrl { self.clear_selection(); }
+                    for name in span { self.set_selected(&name, true); }
+                } else if !ctrl {
+                    self.clear_selection();
+                    self.set_selected(&order[slot], true);
+                    self.selection.anchor = Some(order[slot].clone());
+                }
+                self.selection.focus = Some(order[slot].clone());
+                self.scroll_item_into_view(id, slot);
+                self.repaint_selection(&before, false, Some(id));
+                return Some(LRESULT(0));
+            }
+        }
         match vk {
             k if ctrl && (k == b'C' as u16 || k == b'X' as u16) => {
                 let selected = self.selected_in_display_order();
@@ -837,14 +893,23 @@ impl App {
             .enumerate()
             .filter_map(|(slot, member)| {
                 let k = self.items.iter().position(|i| i.shell.parsing_name.eq_ignore_ascii_case(&member.shell.parsing_name))?;
-                Some((k, grid.slot_rect(slot)))
+                let r = grid.slot_rect(slot);
+                if grid.view == crate::view_state::View::Details {
+                    if r.overlap_area(&grid.body) == 0 { return None; }
+                    return Some((k, r.clamp_into(&grid.body)));
+                }
+                Some((k, r))
             })
             .collect()
     }
 
     /// Mouse move while a band of group `index` is pending or running (`point` in group pixels).
     fn group_band_move(&mut self, index: usize, point: (i32, i32)) {
-        let (id, body) = (self.groups[index].id, self.groups[index].body);
+        let (id, mut body) = (self.groups[index].id, self.groups[index].body);
+        if self.group_view(id) == crate::view_state::View::Details {
+            let scroll = self.layout.groups.iter().find(|g| g.id == id).map_or(0, |g| g.scroll);
+            body = self.group_grid(id, self.group_dpi(id), body, scroll).body;
+        }
         let current = (point.0.clamp(body.left, (body.right - 1).max(body.left)), point.1.clamp(body.top, (body.bottom - 1).max(body.top)));
         let start = match self.drag {
             Drag::Pending { start } => {
@@ -945,11 +1010,62 @@ impl App {
         if !tabs::body_visible(&self.layout.groups, group) || !self.page_group_visible(group)
             || self.pages.moving() || self.qh_group_alpha(group.id) != 255 { return None }
         if self.edge_zone(index, point).is_edge() { return None }
+        if !gw.segments.is_empty() && self.segment_hit(index, point).is_some_and(|(_, part)| part != SegmentPart::Title) { return None }
         let members = tabs::members(&self.layout.groups, group);
         if members.len() < 2 { return None }
         let cells = self.tab_cells_of(group, gw.title, self.group_dpi(group.id));
         let hit = tabs::hit_tab(&cells, point)?;
         members.get(hit as usize).map(|g| g.id)
+    }
+
+    fn segment_hit(&self, index: usize, point: (i32, i32)) -> Option<(u64, SegmentPart)> {
+        self.groups.get(index)?.segments.iter().find_map(|s|
+            s.segment.hit_test(point, s.buttons, s.up_enabled).map(|part| (s.member, part)))
+    }
+
+    /// A segment button captures its member id, never the selected window's id. Releasing
+    /// elsewhere cancels, as do capture loss and Esc; no title drag or tab switch is started.
+    fn segment_button_input(&mut self, index: usize, msg: u32, point: (i32, i32), keys: usize) -> bool {
+        let hit = self.segment_hit(index, point);
+        if self.groups[index].segment_press.is_some() {
+            let lost_press = msg == WM_MOUSEMOVE && keys & MK_LBUTTON == 0 && std::env::var_os("CORRAL_QA_POSTED_INPUT").is_none();
+            let escape = (msg == WM_KEYDOWN && keys == VK_ESCAPE.0 as usize)
+                || (msg == WM_MOUSEMOVE && unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(VK_ESCAPE.0 as i32) } < 0);
+            if matches!(msg, WM_CAPTURECHANGED | WM_CANCELMODE) || lost_press || escape {
+                self.groups[index].segment_press = None;
+                unsafe { let _ = ReleaseCapture(); }
+                self.render_group(index);
+                return true;
+            }
+            if msg == WM_LBUTTONUP {
+                let press = self.groups[index].segment_press.take();
+                unsafe { let _ = ReleaseCapture(); }
+                self.render_group(index);
+                if let Some((member, part)) = press.filter(|p| Some(*p) == hit) {
+                    match part {
+                        SegmentPart::Menu => {
+                            let rect = self.groups[index].rect;
+                            self.show_group_menu(member, self.to_screen((point.0 + rect.left, point.1 + rect.top)));
+                        }
+                        SegmentPart::Close => self.confirm_remove_group(member),
+                        SegmentPart::Up => self.portal_up_click(member),
+                        SegmentPart::Title => {}
+                    }
+                }
+                return true;
+            }
+            if msg == WM_MOUSEMOVE { return true }
+        }
+        if matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK) && matches!(self.drag, Drag::None) {
+            if let Some(hit) = hit.filter(|(_, part)| *part != SegmentPart::Title) {
+                self.clear_tab_hover();
+                self.groups[index].segment_press = Some(hit);
+                unsafe { SetCapture(self.groups[index].hwnd); }
+                self.render_group(index);
+                return true;
+            }
+        }
+        false
     }
 
     /// The full text of a trimmed tab title as a tooltip, after the system hover time (tabs-spec 4). It
@@ -1030,6 +1146,15 @@ impl App {
     /// Transient roll/title references follow the visible representation, not hidden HWNDs.
     pub(super) fn transfer_tab_runtime(&mut self, old: u64, new: u64) {
         if old == new { return }
+        // The set changes HWND on selection; its segment fades follow it so a click or
+        // spring switch does not blink the controls beneath a stationary pointer.
+        let segment_state = self.groups.iter_mut().find(|g| g.id == old).map(|g|
+            (g.segment_hot.take(), std::mem::take(&mut g.segment_hover)));
+        if let (Some((hot, hover)), Some(g)) = (segment_state, self.groups.iter_mut().find(|g| g.id == new)) {
+            g.segment_hot = hot;
+            g.segment_hover = hover;
+            g.segment_press = None;
+        }
         for slot in [&mut self.hot_group, &mut self.pending_hover, &mut self.roll_hover_suppressed, &mut self.title_hot] {
             if *slot == Some(old) { *slot = Some(new); }
         }
@@ -1476,6 +1601,7 @@ impl App {
         // Every press raises the hit group to the top of the z-order first.
         let index = if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_LBUTTONDBLCLK) { self.raise_group(index) } else { index };
         let id = self.groups[index].id;
+        if self.header_input(index, msg, wparam.0, point) { return Some(LRESULT(1)); }
         if matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK) && matches!(self.drag, Drag::None)
             && self.portals.get(&id).is_some_and(|v| v.error.is_some()) {
             let buttons = crate::portal::error_buttons(self.groups[index].body, self.group_dpi(id));
@@ -1537,6 +1663,7 @@ impl App {
             }
             return Some(LRESULT(0));
         }
+        if self.segment_button_input(index, msg, point, wparam.0) { return Some(LRESULT(0)); }
         match msg {
             // Corral windows never hold keyboard focus, so Esc reaches them only as its key state: also
             // check it on every move of the drag.
@@ -1668,7 +1795,8 @@ impl App {
             WM_RBUTTONUP if on_title => {
                 let rect = self.groups[index].rect;
                 let screen = self.to_screen(title_context_menu_point(point, rect));
-                self.show_group_menu(self.tab_hit(index, point).unwrap_or(id), screen);
+                let member = self.segment_hit(index, point).map(|(member, _)| member).or_else(|| self.tab_hit(index, point)).unwrap_or(id);
+                self.show_group_menu(member, screen);
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN if self.groups[index].up_glyph.contains(point.0, point.1) => {
@@ -1894,7 +2022,7 @@ impl App {
     fn zoom_group_icons(&mut self, index: usize, delta: i32) -> bool {
         let id = self.groups[index].id;
         let Some(group) = self.layout.groups.iter().find(|g| g.id == id).cloned() else { return false };
-        if !matches!(group.content, GroupContent::Items { .. }) || self.group_geometry(&group).rolled {
+        if !matches!(group.content, GroupContent::Items { .. }) || self.group_geometry(&group).rolled || self.group_view(id) != crate::view_state::View::Icons {
             return false;
         }
         let (carry, notches) = crate::icon_zoom::accumulate(self.zoom_wheel_carry, delta);
@@ -1952,7 +2080,12 @@ impl App {
         }
         // Use the published rectangles if a coalesced repaint is still owed.
         let geo = super::GroupGeometry { union: gw.rect, title: gw.title.offset(gw.rect.left, gw.rect.top), ..self.group_geometry(group) };
-        let buttons: Vec<Rect> = [gw.menu_glyph, gw.close_glyph, gw.up_glyph, gw.glyph].iter().map(|r| r.offset(gw.rect.left, gw.rect.top)).collect();
+        let mut buttons: Vec<Rect> = [gw.menu_glyph, gw.close_glyph, gw.up_glyph, gw.glyph].iter().map(|r| r.offset(gw.rect.left, gw.rect.top)).collect();
+        for s in &gw.segments {
+            let layout = s.segment.layout;
+            buttons.extend([layout.menu.filter(|_| s.buttons), layout.close.filter(|_| s.buttons), layout.up.filter(|_| s.up_enabled)]
+                .into_iter().flatten().map(|r| r.offset(gw.rect.left, gw.rect.top)));
+        }
         group_hit_zone(&geo, group, (point.0 + gw.rect.left, point.1 + gw.rect.top), self.layout.desktop_locked, &buttons)
     }
 

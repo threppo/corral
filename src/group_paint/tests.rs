@@ -5,6 +5,9 @@ use crate::glyphs::Glyph;
 
 const DPIS: [u32; 5] = [96, 120, 144, 192, 240];
 
+#[path = "segment_tests.rs"]
+mod segment_tests;
+
 fn rect(l: i32, t: i32, r: i32, b: i32) -> Rect {
     Rect::new(l, t, r, b)
 }
@@ -547,7 +550,7 @@ fn a_folded_corral_is_the_strip_with_four_rounded_corners() {
 // ---- 12 tabs ------------------------------------------------------------------------------------
 
 fn tab(title: &str, left: i32, right: i32, active: bool) -> TabItem {
-    TabItem { title: title.into(), hit: rect(left, 0, right, 24), active, hovered: false, own_color: None, custom_text: None, weight: 600, italic: false }
+    TabItem { title: title.into(), hit: rect(left, 0, right, 24), active, hovered: false, own_color: None, custom_text: None, weight: 600, italic: false, segment: None }
 }
 
 #[test]
@@ -917,7 +920,7 @@ mod render {
         let items: Vec<TabItem> = names.iter().enumerate().map(|(i, n)| TabItem {
             title: n.to_string(),
             hit: rect(strip.left + px(28.0, dpi) + i as i32 * cell_w, strip.top, strip.left + px(28.0, dpi) + (i as i32 + 1) * cell_w, strip.bottom),
-            active: i == 0, hovered: i == 1, own_color: (style != 0 && i == 2).then_some([200, 90, 60]), custom_text: None, weight: 600, italic: false,
+            active: i == 0, hovered: i == 1, own_color: (style != 0 && i == 2).then_some([200, 90, 60]), custom_text: None, weight: 600, italic: false, segment: None,
         }).collect();
         let tabs = (style != 0).then_some(TabsPaint { style, tabs: &items });
         let p = PaintInputs {

@@ -19,11 +19,8 @@ pub mod id {
     pub const LARGE: u32 = 0x6111;
     #[cfg(test)]
     pub const MEDIUM: u32 = 0x6112;
-    #[cfg(test)]
     pub const CLASSIC: u32 = 0x6113;
-    #[cfg(test)]
     pub const LIST: u32 = 0x6114;
-    #[cfg(test)]
     pub const DETAILS: u32 = 0x6115;
     #[cfg(test)]
     pub const HIDE_HEADER: u32 = 0x6116;
@@ -33,7 +30,11 @@ pub mod id {
     pub const SORT_TYPE: u32 = 0x6122;
     pub const SORT_DATE: u32 = 0x6123;
     pub const REVERSE: u32 = 0x6124;
-    pub const LAST: u32 = 0x6124;
+    pub const COLUMN_SIZE: u32 = 0x6130;
+    pub const COLUMN_TYPE: u32 = 0x6131;
+    pub const COLUMN_DATE: u32 = 0x6132;
+    pub const COLUMN_RESET: u32 = 0x6133;
+    pub const LAST: u32 = COLUMN_RESET;
 
     /// Whether `command` belongs to the Gate family.
     pub fn is_gate(command: u32) -> bool {
@@ -42,6 +43,7 @@ pub mod id {
 }
 
 /// Windows' view modes the Gate uses (`FOLDERVIEWMODE`).
+#[cfg(test)]
 pub const MODE_ICON: i32 = 1;
 #[cfg(test)]
 pub const MODE_LIST: i32 = 3;
@@ -125,10 +127,27 @@ impl Item {
 }
 
 /// The Gate menu above the shared Corral section (folder-gate-host-spec 5).
+#[cfg(test)]
 pub fn gate_menu(s: &GateMenuState) -> Vec<Item> {
-    // corral-views-spec 7: a Gate is drawn by Corral, so Windows' icon sizes and views are gone (Icons follows
-    // the Corral icon size; List and Details arrive with phase 2 for Corrals and Gates alike).
-    let view = vec![Item::check(id::HIDE_ARROWS, "Hide shortcut arrows", s.hide_arrows)];
+    gate_menu_columns(s, &crate::view_state::DetailsColumns::default())
+}
+pub fn column_menu(columns: &crate::view_state::DetailsColumns) -> Vec<Item> {
+    use crate::view_state::ColumnKey;
+    vec![Item::check(id::COLUMN_SIZE, "Size", columns.contains(ColumnKey::Size)),
+        Item::check(id::COLUMN_TYPE, "Type", columns.contains(ColumnKey::Type)),
+        Item::check(id::COLUMN_DATE, "Date modified", columns.contains(ColumnKey::DateModified)),
+        Item::separator(), Item::command(id::COLUMN_RESET, "Reset columns")]
+}
+pub fn gate_menu_columns(s: &GateMenuState, columns: &crate::view_state::DetailsColumns) -> Vec<Item> {
+    let mode = crate::view_state::View::from_mode(s.mode);
+    let mut view = vec![
+        Item::radio(id::CLASSIC, "Icons", mode == crate::view_state::View::Icons),
+        Item::radio(id::LIST, "List", mode == crate::view_state::View::List),
+        Item::radio(id::DETAILS, "Details", mode == crate::view_state::View::Details),
+        Item::separator(),
+        Item::check(id::HIDE_ARROWS, "Hide shortcut arrows", s.hide_arrows),
+    ];
+    if mode == crate::view_state::View::Details { view.insert(3, Item::separator()); view.insert(4, Item::submenu("Columns", column_menu(columns))); }
     let stored = (1..=4).contains(&s.sort.abs());
     let mut sort: Vec<Item> = SORTS.iter().map(|&(id, label, column)| Item::radio(id, label, s.sort.abs() == column)).collect();
     sort.push(Item::separator());
@@ -346,8 +365,7 @@ mod tests {
         ]);
         let Kind::Submenu(view) = &menu[9].kind else { panic!() };
         let view: Vec<(u32, &str)> = view.iter().map(|i| (i.id, i.label)).collect();
-        // corral-views-spec 7: Windows' icon sizes, List, Details and the header switch are gone from Gates.
-        assert_eq!(view, [(0x6117, "Hide shortcut arrows")]);
+        assert_eq!(view, [(0x6113, "Icons"), (0x6114, "List"), (0x6115, "Details"), (0, ""), (0x6117, "Hide shortcut arrows")]);
         let Kind::Submenu(sort) = &menu[10].kind else { panic!() };
         let sort: Vec<(u32, &str)> = sort.iter().map(|i| (i.id, i.label)).collect();
         assert_eq!(sort, [(0x6120, "Name"), (0x6121, "Size"), (0x6122, "Item type"), (0x6123, "Date modified"), (0, ""), (0x6124, "Reverse order")]);
@@ -361,9 +379,9 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "unique");
-        assert_eq!(count, 13);
+        assert_eq!(count, 16);
         for id in &ids {
-            assert!((0x6101..=0x6124).contains(id), "{id:#x}");
+            assert!((id::FIRST..=id::LAST).contains(id), "{id:#x}");
             assert!(id::is_gate(*id));
         }
         for item in &flat {
@@ -371,6 +389,24 @@ mod tests {
             for name in ["nimi", "explorer", "corral"] {
                 assert!(!label.contains(name), "{:?} contains {name}", item.label);
             }
+        }
+    }
+
+    #[test]
+    fn columns_are_offered_only_in_details_and_match_header_menu() {
+        let mut columns = crate::view_state::DetailsColumns::default();
+        columns.toggle(crate::view_state::ColumnKey::Type);
+        for mode in [1,3,4,8] {
+            let menu = gate_menu_columns(&GateMenuState { mode, ..state() }, &columns);
+            let Kind::Submenu(view) = &menu[9].kind else { panic!() };
+            let submenu = view.iter().find(|i| i.label == "Columns");
+            if matches!(mode,4 | 8) {
+                let Kind::Submenu(items) = &submenu.unwrap().kind else { panic!() };
+                assert_eq!(*items, column_menu(&columns));
+                assert!(items[0].checked && items[1].checked && !items[2].checked);
+                assert_eq!(items[3].kind,Kind::Separator);
+                assert_eq!(items[4].label,"Reset columns");
+            } else { assert!(submenu.is_none()); }
         }
     }
 
@@ -394,15 +430,31 @@ mod tests {
     }
 
     #[test]
-    fn no_windows_view_entries_remain_and_arrows_follow_the_flag() {
+    fn old_windows_sizes_and_header_are_absent_and_arrows_follow_the_flag() {
         for mode in [MODE_ICON, MODE_LIST, MODE_DETAILS, MODE_THUMBNAIL, 0] {
             let flat = all(&GateMenuState { mode, ..state() });
-            for gone in [id::EXTRA_LARGE, id::LARGE, id::MEDIUM, id::CLASSIC, id::LIST, id::DETAILS, id::HIDE_HEADER] {
+            for gone in [id::EXTRA_LARGE, id::LARGE, id::MEDIUM, id::HIDE_HEADER] {
                 assert!(flat.iter().all(|i| i.id != gone), "{gone:#x} in mode {mode}");
             }
         }
         assert!(find(&GateMenuState { hide_arrows: true, ..state() }, id::HIDE_ARROWS).checked);
         assert!(!find(&state(), id::HIDE_ARROWS).checked);
+    }
+
+    #[test]
+    fn drawn_view_radio_maps_all_three_legacy_modes() {
+        for mode in [0, 1, 2, 3, 4, 5, 6, 8, 99] {
+            let s = GateMenuState { mode, ..state() };
+            let icons = find(&s, id::CLASSIC);
+            let list = find(&s, id::LIST);
+            assert_eq!(icons.kind, Kind::Radio);
+            assert_eq!(list.kind, Kind::Radio);
+            let details = find(&s,id::DETAILS);
+            assert_eq!(details.kind,Kind::Radio);
+            assert_eq!([icons.checked,list.checked,details.checked].into_iter().filter(|v| *v).count(),1);
+            assert_eq!(list.checked, matches!(mode,2 | 3));
+            assert_eq!(details.checked, matches!(mode,4 | 8));
+        }
     }
 
     #[test]

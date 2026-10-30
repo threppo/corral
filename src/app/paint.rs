@@ -14,7 +14,7 @@ use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
-use super::{App, Drag, DropSite, GroupGeometry, GroupWindow, Interaction, Item, TitleButton, log, qa_hover};
+use super::{App, Drag, DropSite, GroupGeometry, GroupWindow, Interaction, Item, SegmentHit, TitleButton, log, qa_hover};
 use super::hosting::{client_size, create_layer};
 use super::selection;
 use super::metrics::Grid;
@@ -99,6 +99,11 @@ impl App {
         let members = tabs::members(&self.layout.groups, group);
         if members.len() < 2 { return Vec::new() }
         let style = tabs::TabSettings::from(&self.settings).effective_style(group.style.tabs_style);
+        if let Some(segments) = self.tab_segments_of(group, strip, dpi) {
+            return segments.iter().enumerate().map(|(i, s)| tabs::TabCell { index: i as u32, hit: s.hit,
+                label: Rect::new(s.layout.span.0 + if s.layout.folder.is_some() { group_paint::px(group_paint::GLYPH + group_paint::TEXT_GAP, dpi) } else { 0 },
+                    strip.top, s.layout.span.1, strip.bottom) }).collect();
+        }
         let metrics = self.title_metrics_of(group, dpi);
         let shown = members.iter().position(|m| m.id == group.id).unwrap_or(0);
         // While a tab is dragged near an end of a crowded strip, the strip follows the drag (tabs-spec 5.2).
@@ -106,6 +111,18 @@ impl App {
             .and_then(|g| g.scroll_anchor).unwrap_or(shown);
         let span = self.title_layout_for(group, strip, dpi, 0, false).span;
         tabs::tab_cells(strip, span, &metrics.widths, active, style, dpi)
+    }
+
+    /// Shared by painting, tab selection/reorder/drop targets and strip placement.
+    pub(super) fn tab_segments_of(&self, group: &model::Group, strip: Rect, dpi: u32) -> Option<Vec<group_paint::TabSegment>> {
+        if tabs::TabSettings::from(&self.settings).effective_style(group.style.tabs_style) != group_paint::TABS_ROUNDED { return None }
+        let members = tabs::members(&self.layout.groups, group);
+        if members.len() < 2 { return None }
+        let metrics = self.title_metrics_of(group, dpi);
+        let inputs: Vec<_> = members.iter().enumerate().map(|(i, m)| group_paint::SegmentInput {
+            want: self.title_buttons_of(m), folder: self.portals.contains_key(&m.id), text_w: metrics.widths.get(i).copied().unwrap_or(0),
+        }).collect();
+        group_paint::tab_segments(strip, dpi, &inputs)
     }
 
     /// Visual state of a title button of the window at `index` (spec 6): Disabled when it cannot act,
@@ -265,7 +282,8 @@ impl App {
                 }
             }
             super::pages_glue::register_touch(hwnd);
-            self.groups.push(GroupWindow { id: group.id, hwnd, surface, rect, title: Rect::default(), body: Rect::default(), glyph: Rect::default(), menu_glyph: Rect::default(), close_glyph: Rect::default(), up_glyph: Rect::default(), tab_hover: None, strip_hot: false, hot_button: None });
+            self.groups.push(GroupWindow { id: group.id, hwnd, surface, rect, title: Rect::default(), body: Rect::default(), glyph: Rect::default(), menu_glyph: Rect::default(), close_glyph: Rect::default(), up_glyph: Rect::default(), tab_hover: None, strip_hot: false, hot_button: None,
+                segments: Vec::new(), segment_hot: None, segment_press: None, segment_hover: Default::default() });
             if tabs::body_visible(&self.layout.groups, &group) {
                 self.ensure_drop_target(hwnd, DropSite::Group(group.id));
             } else {
@@ -300,6 +318,69 @@ impl App {
     fn draw_group_cell_fx(&self, ctx: &crate::render::Ctx, item: &Item, x: f32, y: f32, cell: (i32, i32), dpi: u32, group_id: u64, fx: Option<&CellFx>) -> windows::core::Result<()> {
         let bitmap = self.group_icon_bitmap(item, dpi, group_id);
         self.draw_cell_raster(ctx, item, x, y, cell, dpi, self.group_icon_px_of(group_id, dpi) as f32, bitmap.as_deref(), fx)
+    }
+
+    fn draw_details_header(&self, ctx: &crate::render::Ctx, grid: &Grid, id: u64, fx: Option<&CellFx>) -> windows::core::Result<()> {
+        if grid.view != crate::view_state::View::Details { return Ok(()); }
+        let rect = |r: Rect| RectF::new(r.left as f32, r.top as f32, r.right as f32, r.bottom as f32);
+        let scale = grid.dpi as f32 / 96.0;
+        let mut text = self.label_style(grid.dpi);
+        if let Some(f) = fx { let c = camouflage::colorref_rgb(f.effects.label); text.color = Rgba::new(c[0], c[1], c[2], 255); }
+        let label = text.color;
+        text.color.a = 217;
+        if let Some((mut c, x, y)) = text.shadow { c.a = (c.a as f32 * 0.85) as u8; text.shadow = Some((c, x, y)); }
+        let separator = Rgba { a: 64, ..label };
+        let (method, reverse) = self.group_sort_indicator(id);
+        ctx.with_clip(rect(grid.header), |ctx| {
+            for cell in grid.headers.iter().flatten() {
+                let r = cell.rect;
+                if self.header_hover == Some((id, cell.key)) { ctx.fill_rect(rect(r), Rgba { a: 26, ..label })?; }
+                text.align = if cell.key == crate::view_state::ColumnKey::Size { Align::Right } else { Align::Left };
+                let inset = to_px(8, grid.dpi).min(r.width() / 2);
+                let label_rect = RectF::new((r.left + inset) as f32, r.top as f32 + 6.0 * scale, (r.right - inset) as f32, r.bottom as f32);
+                ctx.draw_text(cell.key.label(), label_rect, &text)?;
+                if method == cell.key.method() {
+                    let width = crate::render::measure_text(cell.key.label(), text.family, text.size_px, text.weight).map_or(0.0, |m| m.0).min(label_rect.right - label_rect.left);
+                    let center = if cell.key == crate::view_state::ColumnKey::Size { label_rect.right - width / 2.0 } else { label_rect.left + width / 2.0 };
+                    let glyph = TextStyle { family: "Segoe Fluent Icons", size_px: 8.0 * scale, align: Align::Center, ..text };
+                    ctx.draw_text(if reverse { "\u{e70d}" } else { "\u{e70e}" },
+                        RectF::new(center - 4.0 * scale, r.top as f32, center + 4.0 * scale, r.top as f32 + 8.0 * scale), &glyph)?;
+                }
+                if r.right < grid.header.right { ctx.fill_rect(RectF::new(r.right as f32 - 1.0, r.top as f32, r.right as f32, r.bottom as f32), separator)?; }
+            }
+            ctx.fill_rect(RectF::new(grid.header.left as f32, grid.header.bottom as f32 - 1.0, grid.header.right as f32, grid.header.bottom as f32), separator)
+        })
+    }
+    fn draw_details_columns(&self, ctx: &crate::render::Ctx, grid: &Grid, slot: usize, item: &Item, fx: Option<&CellFx>) -> windows::core::Result<()> {
+        if grid.view != crate::view_state::View::Details { return Ok(()); }
+        let mut text = self.label_style(grid.dpi);
+        if let Some(f) = fx { let c = camouflage::colorref_rgb(f.effects.label); text.color = Rgba::new(c[0], c[1], c[2], 255); }
+        for cell in grid.headers.iter().flatten().skip(1) {
+            let Some(r) = grid.column_rect(cell.key, slot) else { continue };
+            text.align = if cell.key == crate::view_state::ColumnKey::Size { Align::Right } else { Align::Left };
+            ctx.draw_text(item.details.get(cell.key), RectF::new(r.left as f32, r.top as f32, r.right as f32, r.bottom as f32), &text)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn draw_list_slot(&self, ctx: &crate::render::Ctx, item: &Item, slot: super::metrics::Slot, dpi: u32, group_id: u64, fx: Option<&CellFx>) -> windows::core::Result<()> {
+        let rect = |r: Rect| RectF::new(r.left as f32, r.top as f32, r.right as f32, r.bottom as f32);
+        if let Some(bitmap) = self.group_icon_bitmap(item, dpi, group_id) {
+            match fx.filter(|f| f.effects.icons > 0.0) {
+                Some(f) => {
+                    let pixels = camouflage::cached_pixels(&bitmap.bgra_premultiplied, f.effects);
+                    ctx.draw_bitmap(&pixels, bitmap.width, bitmap.height, rect(slot.icon), 1.0)?;
+                }
+                None => ctx.draw_bitmap(&bitmap.bgra_premultiplied, bitmap.width, bitmap.height, rect(slot.icon), 1.0)?,
+            }
+        }
+        let mut text = self.label_style(dpi);
+        text.align = Align::Left;
+        if let Some(f) = fx {
+            let c = camouflage::colorref_rgb(f.effects.label);
+            text.color = Rgba::new(c[0], c[1], c[2], 255);
+        }
+        ctx.draw_text(&item.shell.display_name, rect(slot.label), &text)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -587,11 +668,12 @@ impl App {
         let tabbed = tab_members.len() > 1 && (1..=3).contains(&tab_style);
         let tab_cells = if tabbed && draw_title { self.tab_cells_of(&group, title, geo.dpi) } else { Vec::new() };
         let tabbed = tabbed && !tab_cells.is_empty(); // Narrow-strip fallback: the selected title.
+        let segments = if tabbed { self.tab_segments_of(&group, title, geo.dpi) } else { None };
         let hovered_tab = self.groups[index].tab_hover;
         let up_enabled = is_portal && self.portals.get(&group.id)
             .is_some_and(|view| view.core.try_borrow().is_ok_and(|core| core.nav.can_up()));
         let text_w = if tabbed || !draw_title { 0 } else { title_metrics.widths.get(me).copied().unwrap_or(0) };
-        let layout = if draw_title { self.title_layout_for(&group, title, geo.dpi, text_w, !tabbed) } else { group_paint::TitleLayout::default() };
+        let layout = if draw_title && segments.is_none() { self.title_layout_for(&group, title, geo.dpi, text_w, !tabbed) } else { group_paint::TitleLayout::default() };
         let (menu_state, up_state, close_state) = (
             self.title_button_state(index, TitleButton::Menu, true),
             self.title_button_state(index, TitleButton::Up, up_enabled),
@@ -608,6 +690,21 @@ impl App {
                 custom_text: (!member_look.text_auto).then(|| group_paint::colorref_rgb(member_look.text_color)),
                 weight: group_paint::title_weight(member.style.font_weight),
                 italic: member.style.font_italics.is_some_and(|i| i != 0),
+                segment: segments.as_ref().map(|segments| {
+                    let gw = &self.groups[index];
+                    let hot = gw.segment_hot.filter(|(id, _)| *id == member.id).map(|(_, part)| part);
+                    let state = |part| if hot == Some(part) {
+                        if gw.segment_press == Some((member.id, part)) { group_paint::ButtonState::Pressed } else { group_paint::ButtonState::Hover }
+                    } else { group_paint::ButtonState::Rest };
+                    let level = if qa_hover() { 250.0 } else { gw.segment_hover.get(&member.id).copied().unwrap_or(0.0) };
+                    let progress = (level / 250.0).clamp(0.0, 1.0);
+                    let hover = if hot.is_some() { crate::motion::ease(crate::motion::Curve::Out, progress) }
+                        else { 1.0 - crate::motion::ease(crate::motion::Curve::In, 1.0 - progress) };
+                    let up_enabled = self.portals.get(&member.id).is_some_and(|v| v.core.try_borrow().is_ok_and(|c| c.nav.can_up()));
+                    group_paint::SegmentChrome { layout: segments[cell.index as usize].layout, hover, buttons: hover,
+                        menu: state(group_paint::SegmentPart::Menu), close: state(group_paint::SegmentPart::Close),
+                        up: if up_enabled { state(group_paint::SegmentPart::Up) } else { group_paint::ButtonState::Disabled } }
+                }),
             }
         }).collect();
         let high_contrast = group_paint::high_contrast();
@@ -644,11 +741,13 @@ impl App {
         let grid = {
             let flat = self.group_grid(group.id, geo.dpi, full_body, 0);
             let content = flat.content_px(member_count);
-            let scroll_px = self.scrollbars.get(&group.id).map_or(0, |b|
-                b.offset_px(geo.full_body.height(), content, flat.m.cell_h_px, geo.dpi));
+            let scroll_px = self.scrollbars.get(&group.id).map_or(to_px(group.scroll, geo.dpi), |b|
+                b.offset_px(flat.body.height(), content, flat.m.cell_h_px, geo.dpi));
             Grid { scroll_px: scroll_px.max(0), ..flat }
         };
         let scroll_px = grid.scroll_px;
+        // the hover row is remembered by name: after a scroll under a still pointer it would mark the wrong row
+        let stale_hover = to_dip(scroll_px, geo.dpi) != group.scroll && self.item_hover.as_ref().is_some_and(|(id, _)| *id == group.id);
         // Hit rectangles of the title buttons (relative to the window); the cluster only takes
         // the pointer while it is shown on hover.
         let shown = draw_title && hover > 0.0 && fade > 0 && high_contrast.is_none() || draw_title && high_contrast.is_some();
@@ -656,6 +755,12 @@ impl App {
         let close_rect = layout.close.filter(|_| shown);
         // Up takes the pointer whenever the strip is shown (it is not a hover control).
         let up_rect = layout.up.filter(|_| draw_title && up_enabled && reveal > 0.0);
+        let segment_hits: Vec<_> = tab_items.iter().enumerate().filter_map(|(i, tab)| {
+            let chrome = tab.segment?;
+            Some(SegmentHit { member: tab_members[i].id, segment: group_paint::TabSegment { hit: tab.hit, layout: chrome.layout },
+                buttons: (chrome.buttons > 0.0 && fade > 0 && reveal > 0.0) || high_contrast.is_some(),
+                up_enabled: chrome.up != group_paint::ButtonState::Disabled && reveal > 0.0 })
+        }).collect();
         // Camouflage (camouflage-spec 3.5): body, strip and scrollbar colours were mapped above; icons
         // go through the palette one by one in `draw_cell_fx`; text keeps its colour.
         let origin = self.to_screen((union.left, union.top));
@@ -668,11 +773,9 @@ impl App {
             // wallpaper-blur-spec 8: the backdrop is the blurred wallpaper picture Windows reports,
             // never a copy of the composed desktop with its icons and windows.
             if let Ok(mut mask) = Surface::new(w as u32, h as u32) {
-                let shape = RectF::new(0.0, 0.0, w as f32, h as f32);
-                let radius = paint.radius();
                 let drawn = mask.draw(|ctx| {
                     ctx.clear(Rgba::TRANSPARENT);
-                    ctx.fill_corner_shape(shape, [radius; 4], Rgba::new(255, 255, 255, 255))
+                    group_paint::paint_mask(&mut group_paint::CtxSink(ctx), &paint)
                 });
                 if drawn.is_ok() {
                     tint::composite_blurred_backdrop(surface.pixels_mut(), mask.pixels(), w as usize, h as usize, origin, fade, 1.0);
@@ -683,7 +786,7 @@ impl App {
             // Icons between the fills and the chrome: the outline, glyphs and text never lie under them.
             result = surface.draw(|ctx| {
             if !geo.rolled {
-                let clip = RectF::new(body.left as f32, body.top as f32, body.right as f32, body.bottom as f32);
+                let clip = RectF::new(body.left as f32, grid.body.top.max(body.top).min(body.bottom) as f32, body.right as f32, body.bottom as f32);
                 let members = self.group_members(&group);
                 ctx.with_clip(clip, |ctx| {
                     for (slot, item) in members.iter().enumerate() {
@@ -692,12 +795,29 @@ impl App {
                         if y + cell.1 <= body.top || y >= body.bottom {
                             continue;
                         }
-                        if item.selected || super::item_drag::item_drop_highlight(&item.shell.parsing_name) {
+                        let hot = !stale_hover && grid.is_list() && self.item_hover.as_ref().is_some_and(|(id, name)| *id == group.id && name.eq_ignore_ascii_case(&item.shell.parsing_name));
+                        let focused = grid.is_list() && self.selection.focus.as_ref().is_some_and(|name| name.eq_ignore_ascii_case(&item.shell.parsing_name));
+                        if grid.is_list() && (item.selected || hot || focused || super::item_drag::item_drop_highlight(&item.shell.parsing_name)) {
+                            let r = RectF::new(x as f32, y as f32, (x + cell.0) as f32, (y + cell.1) as f32);
+                            let radius = 4.0 * geo.dpi as f32 / 96.0;
+                            ctx.fill_rounded_rect(r, radius, style::SELECTION_FILL)?;
+                            ctx.stroke_rounded_rect(r, radius, 1.0, style::SELECTION_BORDER)?;
+                        } else if !grid.is_list() && (item.selected || super::item_drag::item_drop_highlight(&item.shell.parsing_name)) {
                             let r = RectF::new(x as f32 + 1.0, y as f32 + 1.0, (x + cell.0) as f32 - 1.0, (y + cell.1) as f32 - 1.0);
                             ctx.fill_rect(r, style::SELECTION_FILL)?;
                             ctx.stroke_rounded_rect(r, 0.0, 1.0, style::SELECTION_BORDER)?;
                         }
-                        self.draw_group_cell_fx(ctx, item, x as f32, y as f32, cell, geo.dpi, group.id, cell_fx.as_ref())?;
+                        if grid.is_list() {
+                            self.draw_list_slot(ctx, item, grid.slot(slot), geo.dpi, group.id, cell_fx.as_ref())?;
+                            self.draw_details_columns(ctx, &grid, slot, item, cell_fx.as_ref())?;
+                        } else {
+                            self.draw_group_cell_fx(ctx, item, x as f32, y as f32, cell, geo.dpi, group.id, cell_fx.as_ref())?;
+                        }
+                    }
+                    if let Some(y) = self.list_insertion(group.id, &grid, members.len()) {
+                        let inset = to_px(8, geo.dpi);
+                        ctx.fill_rect(RectF::new((body.left + inset) as f32, y as f32 - 1.0,
+                            (body.right - inset).max(body.left + inset) as f32, y as f32 + 1.0), style::SELECTION_BORDER)?;
                     }
                     // A Gate's empty, loading or error text, centred in the body in the label colour.
                     let lines = self.gate_body_lines(group.id);
@@ -736,6 +856,10 @@ impl App {
                     }
                     Ok(())
                 })?;
+                if !members.is_empty() {
+                    ctx.with_clip(RectF::new(body.left as f32, body.top as f32, body.right as f32, body.bottom as f32), |ctx|
+                        self.draw_details_header(ctx, &grid, group.id, cell_fx.as_ref()))?;
+                }
             }
             // Outline after every fill and after Camouflage, then glyphs and title text (spec 3.1).
             group_paint::paint_chrome(&mut group_paint::CtxSink(ctx), &paint)
@@ -778,13 +902,21 @@ impl App {
         gw.menu_glyph = menu_rect.unwrap_or_default();
         gw.close_glyph = close_rect.unwrap_or_default();
         gw.up_glyph = up_rect.unwrap_or_default();
+        gw.segments = segment_hits;
+        if gw.segments.is_empty() {
+            gw.segment_hot = None;
+            gw.segment_hover.clear();
+        }
         if let Some(g) = self.layout.group_mut(group.id) { g.scroll = to_dip(scroll_px, geo.dpi); }
+        if stale_hover { self.item_hover = None; self.hide_item_tip(); }
         if !self.pages.snapshotting { self.sync_scrollbar(&group, &geo, member_count, scroll_px, colorref(look.color), colorref(fx.label), fade, hover); }
     }
 
     /// scrollbar-spec 2: overlay lane entirely inside the body, with no grid reservation.
-    fn bar_rect(&self, geo: &GroupGeometry) -> Rect {
-        geo.scrollbar_rect(self.settings.extra_thin_scrollbars)
+    fn bar_rect(&self, geo: &GroupGeometry, id: u64) -> Rect {
+        let mut rect = geo.scrollbar_rect(self.settings.extra_thin_scrollbars);
+        if self.group_view(id) == crate::view_state::View::Details { rect.top = (rect.top + to_px(24, geo.dpi)).min(rect.bottom); }
+        rect
     }
 
     /// scrollbar-spec 2/3/5: synchronize the overlay and its independent show/hide state.
@@ -792,7 +924,7 @@ impl App {
     fn sync_scrollbar(&mut self, group: &model::Group, geo: &GroupGeometry, count: usize, scroll_px: i32, _track: (u8, u8, u8), thumb: (u8, u8, u8), _fade: u8, _hover: f64) {
         let id = group.id;
         let grid = self.group_grid(id, geo.dpi, geo.full_body, 0);
-        let area = geo.full_body.height();
+        let area = grid.body.height();
         let content = grid.content_px(count);
         // A Gate scrolls exactly like a Corral (corral-views-spec 2.1): same content, same bar.
         let range = if content as f64 > area as f64 + 0.5 * geo.dpi as f64 / 96.0 {
@@ -816,6 +948,7 @@ impl App {
         if !self.scrollbars.contains_key(&id) {
             match scrollbar::Bar::create(id, owner, scrollbar_notify) {
                 Ok(bar) => {
+                    bar.seed(scroll_px, geo.dpi); // a new bar starts where the Corral was scrolled, not at 0
                     self.scrollbars.insert(id, bar);
                 }
                 Err(e) => {
@@ -825,7 +958,7 @@ impl App {
             }
         }
         let Some((range, _base_opacity)) = range else { return };
-        let rect = self.bar_rect(geo);
+        let rect = self.bar_rect(geo, id);
         let (sx, sy) = self.to_screen((rect.left, rect.top));
         let effects = self.group_effects(group);
         let (gx, gy) = self.to_screen((geo.union.left, geo.union.top));
@@ -870,7 +1003,7 @@ impl App {
     fn layout_scrollbars(&mut self) {
         for group in self.layout.groups.clone() {
             if let Some(bar) = self.scrollbars.get(&group.id) {
-                let rect = self.bar_rect(&self.group_geometry(&group));
+                let rect = self.bar_rect(&self.group_geometry(&group), group.id);
                 let (sx, sy) = self.to_screen((rect.left, rect.top));
                 bar.move_to(sx, sy);
             }
@@ -899,7 +1032,7 @@ impl App {
         let geo = self.group_geometry(&group);
         let grid = self.group_grid(id, geo.dpi, geo.full_body, 0);
         let row = grid.m.cell_h_px;
-        let area = geo.full_body.height();
+        let area = grid.body.height();
         let content = grid.content_px(count);
         if content as f64 <= area as f64 + 0.5 * geo.dpi as f64 / 96.0 || geo.rolled {
             return;
@@ -909,6 +1042,7 @@ impl App {
         let next = op(current, row, area, max).clamp(0, max);
         log(&format!("scroll id={id} items={count} area={area} content={content} row={row} max={max} current={current} next={next}"));
         if let Some(g) = self.layout.group_mut(id) {g.scroll = to_dip(next, geo.dpi);}
+        if next != current { self.drop_item_hover(id); }
         // scrollbar-spec 4: a fractional offset can cross a device pixel without crossing a whole DIP.
         self.render_group(index);
     }

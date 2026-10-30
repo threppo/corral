@@ -521,8 +521,11 @@ pub const TABS_FLAT: u32 = 1;
 pub const TABS_SEGMENTED: u32 = 2;
 pub const TABS_ROUNDED: u32 = 3;
 
+mod segments;
+pub use segments::*;
+
 /// One tab to paint. `hit` is its cell in the strip's coordinates.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TabItem {
     pub title: String,
     pub hit: Rect,
@@ -535,6 +538,8 @@ pub struct TabItem {
     /// The member's own title font weight and italic flag (measured and drawn the same way).
     pub weight: u16,
     pub italic: bool,
+    /// Separate title-bar chrome; absent on the original narrow Rounded pill path.
+    pub segment: Option<SegmentChrome>,
 }
 
 pub struct TabsPaint<'a> {
@@ -681,6 +686,7 @@ impl PaintInputs<'_> {
 /// and hover mix scaled by `reveal`, and the tab fills. The caller composites a blurred backdrop under
 /// these pixels (step 1) before `paint_chrome`.
 pub fn paint_fills(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
+    if has_segments(p) { return paint_segment_fills(sink, p); }
     let radius = p.radius();
     let outer = rectf(p.outer);
     if let Some(hc) = &p.high_contrast {
@@ -828,6 +834,7 @@ fn flat_bar(tab: &TabItem, strip: Rect, above: bool, dpi: u32) -> RectF {
 /// Steps 5 and 6 (3.1): the outline after every fill and after Camouflage recolouring, then glyphs and
 /// title text in the resolved colour.
 pub fn paint_chrome(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
+    if has_segments(p) { return paint_segment_chrome(sink, p); }
     let hc = p.high_contrast;
     let radius = p.radius();
     if p.outline || hc.is_some() {
@@ -839,6 +846,12 @@ pub fn paint_chrome(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
             sink.fill_ring(rectf(p.outer), [radius; 4], outline_width(p.dpi, hc.is_some()), color)?;
         }
     }
+    paint_title_chrome(sink, p)
+}
+
+/// Text and controls without the outer outline, also used by separate Rounded title bars.
+fn paint_title_chrome(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
+    let hc = p.high_contrast;
     let Some(strip) = p.strip else { return Ok(()) };
     let shown = if hc.is_some() { 1.0 } else { p.fade * p.reveal.clamp(0.0, 1.0) };
     if shown <= 0.0 {

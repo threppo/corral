@@ -274,6 +274,11 @@ pub(super) fn needs_open_confirmation(count: usize, minimum: u32) -> bool {
 /// Put `names` (in the given order) into group `id` at consecutive slots starting at `slot`
 /// (clamped to the end). They are removed from wherever they were first, so `slot` is the final
 /// position of the first one. References only: no file is touched.
+pub(super) fn remaining_insertion_slot(order: &[String], names: &[String], slot: usize) -> usize {
+    let removed = order.iter().take(slot).filter(|n| names.iter().any(|name| name.eq_ignore_ascii_case(n))).count();
+    slot.saturating_sub(removed)
+}
+
 pub(super) fn insert_set(layout: &mut Layout, names: &[String], id: u64, slot: usize) {
     if !layout.groups.iter().any(|g| g.id == id && matches!(g.content, GroupContent::Items { .. })) {
         return;
@@ -297,6 +302,21 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn list_insertion_line_accounts_for_the_rows_dragged_out() {
+        let order = names(&["a", "b", "c", "d"]);
+        let moving = names(&["a", "C"]);
+        assert_eq!(remaining_insertion_slot(&order, &moving, 0), 0);
+        assert_eq!(remaining_insertion_slot(&order, &moving, 1), 0);
+        assert_eq!(remaining_insertion_slot(&order, &moving, 3), 1);
+        assert_eq!(remaining_insertion_slot(&order, &moving, 4), 2);
+        let mut layout = Layout::new();
+        let id = layout.add_group("List".into(), "m".into(), Rect::new(0, 0, 200, 200), GroupContent::Items { items: order.clone() });
+        insert_set(&mut layout, &moving, id, remaining_insertion_slot(&order, &moving, 3));
+        let GroupContent::Items { items } = &layout.groups[0].content else { panic!() };
+        assert_eq!(items, &names(&["b", "a", "C", "d"]));
     }
 
     #[test]

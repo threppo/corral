@@ -263,7 +263,10 @@ impl App {
                 if reject_external { return DropHint::Reject; }
                 APP.with(|cell| {
                     if let Ok(mut guard) = cell.try_borrow_mut() {
-                        if let Some(app) = guard.as_mut() { app.pages_ole_hover((info.point.x, info.point.y), info.keys); }
+                        if let Some(app) = guard.as_mut() {
+                            app.pages_ole_hover((info.point.x, info.point.y), info.keys);
+                            app.update_list_drop_mark(Some((info.point.x, info.point.y)));
+                        }
                     }
                 });
                 if info.entering {
@@ -368,6 +371,11 @@ impl App {
                             .unwrap_or(DropHint::Reject)
                     });
                 if !SPRING_SEEN.with(|seen| seen.get()) { spring_ole(None, message_window); }
+                if matches!(&hint, DropHint::Reject | DropHint::ShellTo(_)) {
+                    APP.with(|cell| { if let Ok(mut guard) = cell.try_borrow_mut() {
+                        if let Some(app) = guard.as_mut() { app.update_list_drop_mark(None); }
+                    } });
+                }
                 hint
             },
             move |dropped| {
@@ -382,12 +390,13 @@ impl App {
                     if let Ok(mut guard) = cell.try_borrow_mut() {
                         if let Some(app) = guard.as_mut() {
                             app.record_external_drop(label_target.take().map(DropSite::Group).unwrap_or(site), dropped);
+                            app.update_list_drop_mark(None);
                         }
                     }
                 });
             },
         ).with_item_feedback(update_drop_highlight).with_leave(|| { spring_reset(); APP.with(|cell| {
-            if let Ok(mut guard) = cell.try_borrow_mut() { if let Some(app) = guard.as_mut() { app.pages_ole_leave(); } }
+            if let Ok(mut guard) = cell.try_borrow_mut() { if let Some(app) = guard.as_mut() { app.pages_ole_leave(); app.update_list_drop_mark(None); } }
         }) }).with_quick_create(
             move |point| APP.with(|cell| cell.try_borrow().ok().is_some_and(|guard| guard.as_ref().is_some_and(|app|
                 !app.settings.disable_create_folder_portal_here
@@ -439,7 +448,14 @@ impl App {
         let client = (dropped.point.x - ox, dropped.point.y - oy);
         let (cw, ch) = self.loose_cell();
         let placement = match site {
-            DropSite::Group(id) => PendingPlacement::Group(id),
+            DropSite::Group(id) => {
+                let slot = self.groups.iter().find(|g| g.id == id).and_then(|gw| {
+                    let group = self.layout.groups.iter().find(|g| g.id == id)?;
+                    let grid = self.group_grid(id, self.group_dpi(id), gw.body, group.scroll);
+                    grid.is_list().then(|| grid.drop_slot((client.0 - gw.rect.left, client.1 - gw.rect.top), self.group_members(group).len()))
+                });
+                slot.map_or(PendingPlacement::Group(id), |slot| PendingPlacement::GroupAt(id, slot))
+            }
             DropSite::Surface => PendingPlacement::Loose((client.0 - cw / 2, client.1 - ch / 3), self.pages.current),
         };
         let now = Instant::now();
@@ -447,6 +463,7 @@ impl App {
             let placement = match placement {
                 // several files dropped loose: stack them in a column like Explorer does
                 PendingPlacement::Loose((x, y), page) => PendingPlacement::Loose((x, y + index as i32 * ch), page),
+                PendingPlacement::GroupAt(id, slot) => PendingPlacement::GroupAt(id, slot + index),
                 other => other,
             };
             self.pending_drops.insert(name.to_lowercase(), (placement, now));
@@ -494,17 +511,23 @@ impl App {
     fn apply_pending_placements(&mut self) {
         let mut changed = false;
         let names: Vec<String> = self.items.iter().map(|i| i.shell.parsing_name.clone()).collect();
+        let mut names = names;
+        names.sort_by_key(|name| match self.pending_drops.get(&name.to_lowercase()).map(|p| p.0) {
+            Some(PendingPlacement::GroupAt(id, slot)) => (id, slot),
+            _ => (u64::MAX, usize::MAX),
+        });
         for name in names {
             let Some((placement, _)) = self.pending_drops.remove(&name.to_lowercase()) else { continue };
             match placement {
-                PendingPlacement::Group(id) => {
+                PendingPlacement::Group(id) | PendingPlacement::GroupAt(id, _) => {
                     // A Gate shows what is in its folder: nothing to record, and no manual mark for its files.
                     let len = self.layout.groups.iter().find(|g| g.id == id).and_then(|g| match &g.content {
                         GroupContent::Items { items } => Some(items.len()),
                         GroupContent::Portal { .. } => None,
                     });
                     if let Some(len) = len {
-                        self.layout.insert_item(&name, id, len);
+                        let slot = match placement { PendingPlacement::GroupAt(_, slot) => slot, _ => len };
+                        self.layout.insert_item(&name, id, slot);
                         self.layout.mark_manual_now(&name);
                         changed = true;
                     }
@@ -558,6 +581,7 @@ impl App {
             if let Drag::Item { name, .. } = &self.drag { let name = name.clone(); self.pages.drag_names = self.drag_set(&name); }
         }
         self.render_ghost();
+        self.render_list_insertions();
         self.spring_tab(Some(screen));
     }
 
@@ -578,9 +602,14 @@ impl App {
 
     /// Draw/position the translucent drag image (icon + label at 60 % opacity).
     fn render_ghost(&mut self) {
-        let Drag::Item { name, current, grab, .. } = &self.drag else { return };
+        let Drag::Item { name, current, grab, owner, .. } = &self.drag else { return };
         let Some(item) = self.items.iter().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)) else { return };
-        let cell = self.loose_cell();
+        let list = self.groups.iter().find(|g| g.hwnd == *owner).and_then(|gw| {
+            let dpi = self.group_dpi(gw.id);
+            let grid = self.group_grid(gw.id, dpi, Rect::new(0, 0, gw.body.width(), to_px(24, dpi)), 0);
+            grid.is_list().then(|| (gw.id, dpi, grid.slot(0)))
+        });
+        let cell = list.map_or_else(|| self.loose_cell(), |(_, _, slot)| (slot.hit.width(), slot.hit.height()));
         if self.ghost.is_none() {
             let hwnd = unsafe {
                 CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST, w!("CorralGhost"),
@@ -597,7 +626,12 @@ impl App {
         let _ = surface.resize(cell.0.max(1) as u32, cell.1.max(1) as u32);
         let drawn = surface.draw(|ctx| {
             ctx.clear(Rgba::TRANSPARENT);
-            self.draw_cell(ctx, item, 0.0, 0.0, cell)
+            if let Some((id, dpi, slot)) = list {
+                let shift = |r: Rect| r.offset(-slot.hit.left, -slot.hit.top);
+                let slot = super::metrics::Slot { icon: shift(slot.icon), label: shift(slot.label), hit: shift(slot.hit) };
+                let effects = self.layout.groups.iter().find(|g| g.id == id).map(|g| super::paint::CellFx { effects: self.group_effects(g) });
+                self.draw_list_slot(ctx, item, slot, dpi, id, effects.as_ref())
+            } else { self.draw_cell(ctx, item, 0.0, 0.0, cell) }
         });
         if drawn.is_ok() {
             let _ = present_layered(hwnd, &surface, position, 153);
@@ -616,6 +650,13 @@ impl App {
                 let _ = DestroyWindow(hwnd);
             }
         }
+        self.render_list_insertions();
+    }
+
+    fn render_list_insertions(&mut self) {
+        let indices: Vec<_> = self.groups.iter().enumerate().filter(|(_, g)| self.group_view(g.id) != crate::view_state::View::Icons)
+            .map(|(i, _)| i).collect();
+        for index in indices { self.render_group(index); }
     }
 
     /// Hand an active icon drag over to OLE when the cursor is over a foreign window or a Corral
@@ -708,6 +749,10 @@ impl App {
                 let group = self.layout.groups.iter().find(|g| g.id == id)?;
                 let dpi = self.group_dpi(id);
                 let grid = self.group_grid(id, dpi, self.groups[index].body, group.scroll);
+                if grid.is_list() {
+                    let icon = grid.slot(grid.slot_at(local)?).icon;
+                    return icon.contains(local.0, local.1).then_some(name);
+                }
                 let slot = grid.slot_rect(grid.slot_at(local)?);
                 let in_cell = (local.0 - slot.left, local.1 - slot.top);
                 on_icon(in_cell, (slot.width(), slot.height()), grid.m.icon_px, dpi).then_some(name)
@@ -878,6 +923,9 @@ impl App {
             });
             if let Some(end) = end {
                 log(&format!("drop of {} item(s) on the tab label of group {member}", names.len()));
+                let sorted_list = self.layout.groups.iter().find(|g| g.id == member).is_some_and(|g|
+                    self.group_view(member) != crate::view_state::View::Icons && crate::sorting::is_maintained(g.sort_method, g.sort_flags));
+                if source == Some(member) && sorted_list { return; }
                 selection::insert_set(&mut self.layout, &names, member, end);
                 self.select_tab(member);
                 self.record_desk_edit(); self.save();
@@ -896,15 +944,20 @@ impl App {
             }
             Some((id, rect, body)) => {
                 if source == Some(id) {
+                    let group = self.layout.groups.iter().find(|g| g.id == id).unwrap();
+                    if self.group_view(id) != crate::view_state::View::Icons && crate::sorting::is_maintained(group.sort_method, group.sort_flags) {
+                        return;
+                    }
                     self.sorted_move(id, start, screen);
                 }
                 let dpi = self.group_dpi(id);
                 let scroll = self.layout.groups.iter().find(|g| g.id == id).map_or(0, |g| g.scroll);
                 let grid = self.group_grid(id, dpi, body, scroll);
                 let count = self.layout.groups.iter().find(|g| g.id == id).map_or(0, |g| self.group_members(g).len());
-                let slot = grid.drop_slot((client.0 - rect.left, client.1 - rect.top), count) as i32;
+                let slot = grid.drop_slot((client.0 - rect.left, client.1 - rect.top), count);
+                let slot = if grid.is_list() { selection::remaining_insertion_slot(&self.container_order(Some(id)), &names, slot) } else { slot };
                 log(&format!("drop of {} item(s) into group {id} at slot {slot}", names.len()));
-                selection::insert_set(&mut self.layout, &names, id, slot.max(0) as usize);
+                selection::insert_set(&mut self.layout, &names, id, slot);
             }
             None => {
                 let cell_origin = (client.0 - grab.0, client.1 - grab.1);
@@ -951,10 +1004,11 @@ impl App {
             .map(|name| {
                 let home = match self.group_of(name) {
                     Some(id) => {
-                        let cells = self.group_cells(id, self.group_dpi(id));
+                        let dpi = self.group_dpi(id);
+                        let body = self.groups.iter().find(|g| g.id == id).map_or(Rect::new(0, 0, 1, 1), |g| g.body);
+                        let grid = self.group_grid(id, dpi, body, 0);
                         let slot = self.container_order(Some(id)).iter().position(|n| n.eq_ignore_ascii_case(name)).unwrap_or(0) as i32;
-                        let body_width = self.groups.iter().find(|g| g.id == id).map_or(cells.cell_w_px, |g| g.body.width());
-                        let cols = cells.cols_for(body_width);
+                        let cols = grid.cols;
                         Home::Group { id, col: slot % cols, row: slot / cols }
                     }
                     None => Home::Loose(self.items.iter().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)).map_or((0, 0), |i| i.pos)),

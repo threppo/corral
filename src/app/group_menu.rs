@@ -39,6 +39,9 @@ pub(super) mod corral_cmd {
     pub const SORT_CREATED: u32 = 22;
     pub const REVERSE: u32 = 23;
     pub const CONFIGURE: u32 = 24;
+    pub const VIEW_ICONS: u32 = 25;
+    pub const VIEW_LIST: u32 = 26;
+    pub const VIEW_DETAILS: u32 = 27;
 }
 use corral_cmd::*;
 
@@ -266,7 +269,7 @@ fn accepted_tab_combine(result: &crate::dialog::DialogResult) -> (bool, bool) {
 }
 
 impl App {
-    fn tab_menu_owner(&self, member: u64) -> HWND {
+    pub(super) fn tab_menu_owner(&self, member: u64) -> HWND {
         let active = tabs::collect(&self.layout.groups, member).map_or(member, |v| v.active);
         self.groups.iter().find(|g| g.id == active).map(|g| g.hwnd).unwrap_or(self.surface_hwnd)
     }
@@ -498,6 +501,7 @@ impl App {
     /// confirmation from the menu). Files are never touched; a removed Corral's members become loose.
     pub(super) fn remove_group(&mut self, id: u64) {
         if self.layout.desktop_locked { return }
+        self.drop_item_hover(id);
         let view = tabs::collect(&self.layout.groups, id);
         if let Err(e) = self.layout.remove_tab_record(id, self.pages.current) {
             log(&format!("tab removal rejected: {e:?}"));
@@ -571,6 +575,20 @@ impl App {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let tab_members = self.append_tabs_menu(menu, None, id);
             if let Ok(view_menu) = CreatePopupMenu() {
+                let _ = AppendMenuW(view_menu, MF_STRING, BASE + VIEW_ICONS as usize, w!("Icons"));
+                let _ = AppendMenuW(view_menu, MF_STRING, BASE + VIEW_LIST as usize, w!("List"));
+                let _ = AppendMenuW(view_menu, MF_STRING, BASE + VIEW_DETAILS as usize, w!("Details"));
+                let checked = BASE + match self.group_view(id) { crate::view_state::View::Icons => VIEW_ICONS, crate::view_state::View::List => VIEW_LIST, crate::view_state::View::Details => VIEW_DETAILS } as usize;
+                let _ = CheckMenuRadioItem(view_menu, (BASE + VIEW_ICONS as usize) as u32,
+                    (BASE + VIEW_DETAILS as usize) as u32, checked as u32, MF_BYCOMMAND.0);
+                let _ = AppendMenuW(view_menu, MF_SEPARATOR, 0, PCWSTR::null());
+                if self.group_view(id) == crate::view_state::View::Details {
+                    if let Ok(columns) = CreatePopupMenu() {
+                        self.append_columns_menu(columns, id);
+                        let _ = AppendMenuW(view_menu, MF_POPUP, columns.0 as usize, w!("Columns"));
+                        let _ = AppendMenuW(view_menu, MF_SEPARATOR, 0, PCWSTR::null());
+                    }
+                }
                 append_entries(view_menu, &view_menu_entries(&view));
                 let _ = AppendMenuW(menu, MF_POPUP, view_menu.0 as usize, w!("&View"));
             }
@@ -607,6 +625,7 @@ impl App {
             (choice, tab_members)
         };
         log(&format!("group {id}: title menu choice {choice:#x}"));
+        if self.column_command(id, choice as u32) { return; }
         if self.tab_menu_command(id, choice, &tab_members) { return }
         match choice {
             RENAME_ID => self.begin_naming(id),
@@ -635,6 +654,9 @@ impl App {
             tabs::collect(&self.layout.groups, id).map_or(id, |v| v.active)
         } else { id };
         match cmd {
+            VIEW_ICONS => self.set_group_view(id, crate::view_state::View::Icons),
+            VIEW_LIST => self.set_group_view(id, crate::view_state::View::List),
+            VIEW_DETAILS => self.set_group_view(id, crate::view_state::View::Details),
             ROLL_UP => self.toggle_roll(id),
             QUICK_HIDE => {
                 if tabs::collect(&self.layout.groups, id).is_some_and(|v| v.members.len() > 1)
@@ -818,12 +840,10 @@ impl App {
 
     /// Sort commands: a method is stored only when it changes; Reverse
     /// order toggles its flag (folders are always first, motion-sorting-spec 2). Then save and relayout (re-sort).
-    fn set_group_sort(&mut self, id: u64, method: Option<u32>, toggle_flags: u32) {
+    pub(super) fn set_group_sort(&mut self, id: u64, method: Option<u32>, toggle_flags: u32) {
         let Some(group) = self.layout.group_mut(id) else { return };
         if let Some(method) = method {
-            if group.sort_method == method {
-                return;
-            }
+            if group.sort_method == method { return; }
             group.sort_method = method;
         }
         group.sort_flags ^= toggle_flags;
@@ -847,7 +867,13 @@ impl App {
             let mut missing: Vec<String> = Vec::new();
             for name in items {
                 match self.items.iter().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)) {
-                    Some(item) => found.push((name.clone(), sort_key(&item.shell, method))),
+                    Some(item) => {
+                        // Details' type fact was read during loading. A type-sort command must not
+                        // ask a Shell extension for it on the UI thread (including before it arrives).
+                        let mut key = sort_key(&item.shell, if method == sorting::METHOD_TYPE { sorting::METHOD_NONE } else { method });
+                        if method == sorting::METHOD_TYPE { key.type_text = item.details.kind.clone(); }
+                        found.push((name.clone(), key));
+                    }
                     None => missing.push(name.clone()),
                 }
             }

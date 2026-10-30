@@ -3,7 +3,7 @@
 A short screen recording of Corral's preview window with throwaway sample files. Nothing on the
 real desktop is touched: the preview shows only the scratch folder.
 
-**Recorded on 29 October 2026:** [corral-demo.mp4](https://github.com/Jiigsi/corral/releases/download/v0.1.0-alpha/corral-demo.mp4)
+**Recorded on 29 October 2026:** [corral-demo.mp4](https://github.com/threppo/corral/releases/download/v0.1.0-alpha/corral-demo.mp4)
 (57 seconds), also shown as a GIF in the README. Claude Code rehearsed each step and then ran it
 with the guarded test driver, using the v0.1.0-alpha `corral.exe`, and recorded only Corral's own
 windows with ffmpeg. Two things changed from the first draft of this plan:
@@ -60,7 +60,7 @@ As recorded:
 | 28–35 s | In the Home folder Gate, double-click "Recipes", then click the Up arrow in its title. | "Folder Gates: browse a folder right on the desktop" |
 | 35–41 s | Double-click the Documents title to fold it, then again to unfold. | "Fold a Corral down to its title bar" |
 | 41–52 s | Settings window: Welcome, then Round-up, then Glance. | "Settings: rules for new icons, Glance shortcuts" |
-| 52–57 s | Back on the tidy preview. | `github.com/Jiigsi/corral` |
+| 52–57 s | Back on the tidy preview. | `github.com/threppo/corral` |
 
 If a step does not behave as described, keep it out of the recording and note it as an issue
 rather than re-taking until it works by luck.

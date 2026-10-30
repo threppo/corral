@@ -302,6 +302,9 @@ pub struct ScrollModel {
     pub content: f64,
     pub pitch: f64,
     motion: Tween,
+    /// An offset to jump to right after the next `sync` (a view switch or a newly created bar): until then
+    /// the content height is unknown and clamping would lose it.
+    pub seed: Option<f64>,
 }
 impl Default for ScrollModel {
     fn default() -> Self {
@@ -312,6 +315,7 @@ impl Default for ScrollModel {
             content: 0.0,
             pitch: 1.0,
             motion: Tween::fixed(0.0),
+            seed: None,
         }
     }
 }
@@ -332,6 +336,11 @@ impl ScrollModel {
             self.target = (self.target * ratio).clamp(0.0, self.max());
             self.motion = Tween::fixed(self.offset);
             self.target = self.offset;
+        }
+        if let Some(seed) = self.seed.take() {
+            self.offset = seed.clamp(0.0, self.max());
+            self.target = self.offset;
+            self.motion = Tween::fixed(self.offset);
         }
     }
     pub fn tick(&mut self, now: u64) {
@@ -856,6 +865,10 @@ impl Bar {
         let s = self.state.borrow();
         (s.p.x, s.p.y, s.p.w, s.p.h)
     }
+    /// Jump (no animation) to `px` at the next paint.
+    pub fn seed(&self, px: i32, dpi: u32) {
+        self.state.borrow_mut().scroll.seed = Some(px as f64 / scale(dpi));
+    }
     pub fn offset_px(&self, view: i32, content: i32, pitch: i32, dpi: u32) -> i32 {
         let mut s = self.state.borrow_mut();
         let now = s.now();
@@ -1339,6 +1352,19 @@ mod tests {
         let mut m = ScrollModel::default();
         m.sync(320.0, 3000.0, 64.0, 0);
         m
+    }
+
+    #[test]
+    fn a_seed_lands_after_the_next_sync_without_animation_and_clamped() {
+        let mut m = ScrollModel::default();
+        m.seed = Some(500.0);
+        m.sync(320.0, 3000.0, 64.0, 0);
+        close(m.offset, 500.0);
+        close(m.target, 500.0);
+        assert!(m.seed.is_none());
+        m.seed = Some(9000.0);
+        m.sync(320.0, 3000.0, 64.0, 10);
+        close(m.offset, 2680.0);
     }
 
     // scrollbar-spec 8.1-4

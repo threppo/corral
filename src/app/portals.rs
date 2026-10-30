@@ -77,7 +77,7 @@ struct GateItems {
     id: u64,
     seq: u64,
     path: String,
-    result: Result<Vec<shell::ShellItem>, u32>,
+    result: Result<Vec<(shell::ShellItem, super::details::Text)>, u32>,
 }
 
 /// Global sequence numbers also reject results from a removed and recreated Gate with the same id.
@@ -101,6 +101,12 @@ impl PortalView {
 }
 
 impl App {
+    /// An inactive Gate can still own a visible Rounded title segment.
+    fn render_gate_member(&mut self, member: u64) {
+        let active = crate::tabs::collect(&self.layout.groups, member).map_or(member, |set| set.active);
+        if let Some(i) = self.groups.iter().position(|g| g.id == active) { self.render_group(i); }
+    }
+
     /// Read accessor for frame/tab drops, including inactive Gates.
     pub(super) fn portal_current_path(&self, id: u64) -> Option<&str> {
         self.portals.get(&id).map(|view| view.current.as_str()).filter(|path| !path.is_empty())
@@ -144,10 +150,10 @@ impl App {
         let desktop = self.items.iter().filter(|i| i.gate.is_none())
             .map(|i| i.shell.parsing_name.to_lowercase()).collect();
         self.gate_items(id, desktop);
-        if let Some(i) = self.groups.iter().position(|g| g.id == id) { self.render_group(i); }
+        self.render_gate_member(id);
     }
 
-    /// Only plain ShellItem data crosses apartments; enumeration and disk-backed sort facts stay here.
+    /// Only owned item data crosses apartments; enumeration, sort facts and Details text stay on this worker.
     pub(super) fn gate_items(&mut self, id: u64, desktop: std::collections::HashSet<String>) {
         let sort = self.gate_sort_of(id);
         let Some(view) = self.portals.get_mut(&id) else { return };
@@ -165,7 +171,7 @@ impl App {
                     let (method, flags) = gate_sort(sort);
                     let keys: Vec<_> = all.iter().map(|s| group_menu::sort_key(s, method)).collect();
                     crate::sorting::order(&keys, method, flags, &crate::sorting::SystemCollator::user_default())
-                        .into_iter().map(|k| all[k].clone()).collect()
+                        .into_iter().map(|k| (all[k].clone(), super::details::Text::load(&all[k]))).collect()
                 }).map_err(|e| e.code().0 as u32);
                 unsafe { CoUninitialize(); }
                 result
@@ -194,17 +200,18 @@ impl App {
         let selected: std::collections::HashSet<_> = self.items.iter().filter(|i| i.gate == Some(batch.id) && i.selected)
             .map(|i| i.shell.parsing_name.to_lowercase()).collect();
         self.items.retain(|i| i.gate != Some(batch.id));
+        self.drop_item_hover(batch.id); // the listing is replaced
         // Desktop membership may have changed while this batch was being read.
         let desktop: std::collections::HashSet<_> = self.items.iter().filter(|i| i.gate.is_none())
             .map(|i| i.shell.parsing_name.to_lowercase()).collect();
-        self.items.extend(all.into_iter().filter(|s| !desktop.contains(&s.parsing_name.to_lowercase())).map(|shell| {
+        self.items.extend(all.into_iter().filter(|(s, _)| !desktop.contains(&s.parsing_name.to_lowercase())).map(|(shell, details)| {
             let selected = selected.contains(&shell.parsing_name.to_lowercase());
-            super::Item { shell, icon: None, pos: (0, 0), placed: false, selected, gate: Some(batch.id) }
+            super::Item { shell, details, icon: None, pos: (0, 0), placed: false, selected, gate: Some(batch.id) }
         }));
         if let Some(view) = self.portals.get_mut(&batch.id) { view.loaded = true; }
         self.index_gate_items();
         self.retain_group_icon_rasters();
-        if let Some(i) = self.groups.iter().position(|g| g.id == batch.id) { self.render_group(i); }
+        self.render_gate_member(batch.id);
     }
 
     /// Open `name` when it is a folder a Gate shows: inside the Gate when Allow navigation is on and it is
@@ -345,7 +352,12 @@ impl App {
             // corral-views-spec 2.2: the folder is there; record the visit, read it and draw it.
             let _ = replaced; // the start-up climb's ancestor is visited like any other folder
             // Another folder starts at its top: a fresh bar has no offset.
-            if self.portals.get(&id).is_some_and(|v| !portal::same_folder(&v.current, &path)) { self.scrollbars.remove(&id); }
+            if self.portals.get(&id).is_some_and(|v| !portal::same_folder(&v.current, &path)) {
+                self.scrollbars.remove(&id);
+                // a new bar is seeded from the stored offset (views): the old folder's must not carry over
+                if let Some(g) = self.layout.group_mut(id) { g.scroll = 0; }
+                self.drop_item_hover(id);
+            }
             if let Some(view) = self.portals.get_mut(&id) {
                 if let Ok(mut core) = view.core.try_borrow_mut() {
                     core.nav.visit(&path); // Back/Forward already moved the cursor there: nothing to add
@@ -395,7 +407,7 @@ impl App {
             }
         }
         log(&format!("portal {id}: {path} is unavailable ({kind:?})"));
-        if let Some(i) = self.groups.iter().position(|g| g.id == id) { self.render_group(i); }
+        self.render_gate_member(id);
     }
 
     /// Try again: probe the folder the Gate is stuck on (the Try again button, Refresh in an error
@@ -429,7 +441,7 @@ impl App {
         Some(GateMenuState {
             allow,
             at_root,
-            mode: portal_menu::MODE_ICON,
+            mode: self.group_view(id).mode(),
             icon_px: 0,
             header_hidden: false,
             hide_arrows: group.hide_link_overlays,
@@ -438,7 +450,7 @@ impl App {
     }
 
     /// The signed sort column of the folder Gate `id` shows (folder-gate-views-spec 2; default Name ascending).
-    fn gate_sort_of(&self, id: u64) -> i32 {
+    pub(super) fn gate_sort_of(&self, id: u64) -> i32 {
         let Some(view) = self.portals.get(&id) else { return 1 };
         let ctx = view_state::Context { desktop_icon_size: 32 };
         match view_state::resolve_view(&view.current, &self.layout.view_states, self.portal_inherits(id), ctx).sort {
@@ -450,7 +462,11 @@ impl App {
     /// Run a Gate-family command (folder-gate-host-spec 5).
     fn run_gate_command(&mut self, id: u64, command: u32) {
         use portal_menu::id as ids;
+        if self.column_command(id, command) { return; }
         match command {
+            ids::CLASSIC => self.set_group_view(id, view_state::View::Icons),
+            ids::LIST => self.set_group_view(id, view_state::View::List),
+            ids::DETAILS => self.set_group_view(id, view_state::View::Details),
             ids::OPEN_FOLDER => self.portal_open_folder(id),
             ids::CHOOSE_FOLDER => self.portal_choose_folder(id),
             ids::CONFIGURE_FOLDER => self.portal_configure_folder(id),
@@ -613,7 +629,7 @@ impl App {
     /// click on the strip. The Gate section comes from `portal_menu::gate_menu`, then the Tabs entry
     /// and the shared Corral section.
     pub(super) fn show_portal_title_menu(&mut self, id: u64, screen: (i32, i32)) {
-        let owner = self.groups.iter().find(|g| g.id == id).map(|g| g.hwnd).unwrap_or(self.surface_hwnd);
+        let owner = self.tab_menu_owner(id);
         let (choice, tab_members) = unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
             let Some(tab_members) = self.append_portal_title_menu(menu, id) else { let _ = DestroyMenu(menu); return };
@@ -634,7 +650,7 @@ impl App {
         let state = self.gate_menu_state(id)?;
         let shared = self.view_menu_state(id, group);
         unsafe {
-            append_gate_items(menu, &portal_menu::gate_menu(&state));
+            append_gate_items(menu, &portal_menu::gate_menu_columns(&state, &self.group_columns(id)));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let tab_members = self.append_tabs_menu(menu, None, id);
             group_menu::append_entries(menu, &group_menu::view_menu_entries(&shared));
@@ -688,11 +704,10 @@ impl App {
         self.items.retain(|i| i.gate != Some(id));
         self.index_gate_items();
         self.scrollbars.remove(&id);
+        self.drop_item_hover(id);
         self.save();
         self.probe_target(id, &path);
-        if let Some(i) = self.groups.iter().position(|g| g.id == id) {
-            self.render_group(i);
-        }
+        self.render_gate_member(id);
     }
 
     /// "Allow navigation" (Gate flag bit 0x1): turning it off sends the Gate to its root now.
@@ -708,9 +723,7 @@ impl App {
         if let Some(root) = to_root {
             self.probe_target(id, &root);
         }
-        if let Some(i) = self.groups.iter().position(|g| g.id == id) {
-            self.render_group(i);
-        }
+        self.render_gate_member(id);
     }
 
     /// Rename: refused with an explanation while navigated below the root and the title follows
@@ -728,7 +741,7 @@ impl App {
 
     /// Sort by / Reverse order: store the folder's sort (a user change, folder-gate-views-spec 4) and re-read
     /// the Gate in that order.
-    fn portal_sort(&mut self, id: u64, sort: i32) {
+    pub(super) fn portal_sort(&mut self, id: u64, sort: i32) {
         if !(1..=4).contains(&sort.abs()) {
             return;
         }
@@ -758,7 +771,7 @@ impl App {
 
 /// Turn the Gate menu model into `HMENU` items: hidden items are left out, a disabled item is grayed,
 /// a checked item carries the check mark or the radio bullet.
-unsafe fn append_gate_items(menu: HMENU, items: &[portal_menu::Item]) {
+pub(super) unsafe fn append_gate_items(menu: HMENU, items: &[portal_menu::Item]) {
     for item in items.iter().filter(|i| !i.hidden) {
         unsafe {
             match &item.kind {

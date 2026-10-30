@@ -140,7 +140,7 @@ impl App {
             let position = own.or(position);
             let icon = shell::icon_for_policy(&shell_item, icon_px, crate::icon_overlay::Policy(self.settings.hide_shortcut_overlays)).ok();
             let selected = selected.contains(&shell_item.parsing_name.to_lowercase());
-            items.push(Item { shell: shell_item, icon, pos, placed: position.is_some(), selected, gate: None });
+            items.push(Item { details: Default::default(), shell: shell_item, icon, pos, placed: position.is_some(), selected, gate: None });
         }
         // Keep Gate listings while local folders re-read in the background. Network Gates refresh
         // after their probe, as before, rather than on every desktop notification.
@@ -153,6 +153,7 @@ impl App {
             if item.gate.is_some_and(|g| self.portals.contains_key(&g)) && !desktop.contains(&item.shell.parsing_name.to_lowercase()) { items.push(item); }
         }
         self.items = items;
+        self.load_details();
         for id in gates { self.gate_items(id, desktop.clone()); }
         self.index_gate_items();
         GROUP_RASTERS.with(|cache| cache.borrow_mut().reset(self.surface_hwnd.0 as isize));

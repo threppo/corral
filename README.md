@@ -3,11 +3,11 @@
 **A desktop icon organizer for Windows, built as a personal project with AI coding agents.**
 
 **Status: alpha.** The features below work and have been tested live on Windows 11, but expect
-rough edges; see [Known issues](#known-issues). Download: [v0.1.0-alpha](https://github.com/Jiigsi/corral/releases/tag/v0.1.0-alpha).
+rough edges; see [Known issues](#known-issues). Download: [v0.1.0-alpha](https://github.com/threppo/corral/releases/tag/v0.1.0-alpha).
 
 ![Demo: drawing and naming a Corral, dragging icons in, browsing a Folder Gate, folding, Settings](assets/screenshots/corral-demo.gif)
 
-57-second demo with sample files ([MP4](https://github.com/Jiigsi/corral/releases/download/v0.1.0-alpha/corral-demo.mp4), [how it was recorded](docs/showcase/demo-script.md)).
+57-second demo with sample files ([MP4](https://github.com/threppo/corral/releases/download/v0.1.0-alpha/corral-demo.mp4), [how it was recorded](docs/showcase/demo-script.md)).
 
 Corral keeps the desktop tidy with a set of building blocks you arrange yourself:
 

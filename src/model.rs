@@ -108,13 +108,40 @@ pub struct Group {
     legacy_scroll: IgnoredKey,
     /// Keys on a Corral that this build does not know are carried through a load and save (tabs-spec 8).
     /// Only Corral-level keys: unknown keys elsewhere in the file are not kept.
-    #[serde(flatten, default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(flatten, default, serialize_with = "group_extra", skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 /// A stored key that is read and dropped; two groups never differ by it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IgnoredKey;
+
+impl Group {
+    pub fn columns(&self) -> crate::view_state::DetailsColumns { crate::view_state::DetailsColumns::parse(self.extra.get("columns")) }
+    pub fn set_columns(&mut self, columns: &crate::view_state::DetailsColumns) { self.extra.insert("columns".into(), serde_json::json!(columns.0)); }
+    pub fn reset_columns(&mut self) { self.extra.remove("columns"); }
+    pub fn view(&self) -> crate::view_state::View {
+        crate::view_state::View::from_key(self.extra.get("view").and_then(serde_json::Value::as_str))
+    }
+    pub fn set_view(&mut self, view: crate::view_state::View) {
+        use crate::view_state::View;
+        match view {
+            View::Icons => { self.extra.remove("view"); }
+            View::List => { self.extra.insert("view".into(), serde_json::json!("list")); }
+            View::Details => { self.extra.insert("view".into(), serde_json::json!("details")); }
+        }
+    }
+}
+
+fn group_extra<S: serde::Serializer>(extra: &std::collections::BTreeMap<String, serde_json::Value>, serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(None)?;
+    for (key, value) in extra {
+        if key == "view" && crate::view_state::View::from_key(value.as_str()) == crate::view_state::View::Icons { continue; }
+        map.serialize_entry(key, value)?;
+    }
+    map.end()
+}
 
 impl PartialEq for IgnoredKey {
     fn eq(&self, _: &Self) -> bool { true }
@@ -730,6 +757,49 @@ pub fn save(path: &Path, layout: &Layout) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_columns_removes_the_corral_key_and_reloads_defaults() {
+        use crate::view_state::{DetailsColumns, View};
+        let mut layout = Layout::new();
+        let id = layout.add_group("Columns".into(), "m".into(), Rect::new(0,0,300,200), GroupContent::Items {items:vec!["item".into()]});
+        let group = layout.group_mut(id).unwrap();
+        group.set_view(View::Details);
+        group.extra.insert("future".into(), serde_json::json!({"keep":1}));
+        let baseline = group.clone();
+        group.set_columns(&DetailsColumns::parse(Some(&serde_json::json!([{"key":"type","width":123},{"future":true}]))));
+        group.reset_columns();
+        assert_eq!(*group, baseline);
+        let saved = serde_json::to_value(&layout).unwrap();
+        assert!(saved["groups"][0].get("columns").is_none());
+        let reload: Layout = serde_json::from_value(saved).unwrap();
+        assert_eq!(reload.groups[0].columns(), DetailsColumns::default());
+    }
+
+    #[test]
+    fn corral_view_defaults_and_round_trips_without_writing_icons() {
+        use crate::view_state::View;
+        let mut layout = Layout::new();
+        let id = layout.add_group("Views".into(), "m".into(), Rect::new(0, 0, 100, 100), GroupContent::Items { items: vec!["item".into()] });
+        let before = layout.clone();
+        assert_eq!(layout.groups[0].view(), View::Icons);
+        assert!(!serde_json::to_value(&layout).unwrap()["groups"][0].as_object().unwrap().contains_key("view"));
+        for value in [serde_json::json!("unknown"), serde_json::json!("icons"), serde_json::json!(null), serde_json::json!(42)] {
+            let mut json = serde_json::to_value(&before).unwrap();
+            json["groups"][0]["view"] = value;
+            let parsed: Layout = serde_json::from_value(json).unwrap();
+            assert_eq!(parsed.groups[0].view(), View::Icons);
+            assert!(!serde_json::to_value(&parsed).unwrap()["groups"][0].as_object().unwrap().contains_key("view"));
+        }
+        for (view, key) in [(View::List, "list"), (View::Details, "details")] {
+            layout.group_mut(id).unwrap().set_view(view);
+            let value = serde_json::to_value(&layout).unwrap();
+            assert_eq!(value["groups"][0]["view"], key);
+            assert_eq!(serde_json::from_value::<Layout>(value).unwrap().groups[0].view(), view);
+        }
+        layout.group_mut(id).unwrap().set_view(View::Icons);
+        assert_eq!(layout, before, "view commands affect only display state");
+    }
 
     #[test]
     fn scroll_offset_is_never_persisted_and_old_values_are_ignored() {

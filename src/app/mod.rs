@@ -8,6 +8,8 @@ mod hosting;
 mod input;
 mod item_drag;
 mod metrics;
+mod views;
+mod details;
 mod paint;
 mod pages_glue;
 mod peek;
@@ -109,6 +111,7 @@ const HOTKEY_QUIT: i32 = 1;
 const EM_SETSEL: u32 = 0x00B1;
 
 struct Item {
+    details: details::Text,
     shell: ShellItem,
     icon: Option<IconBitmap>,
     /// Loose icon cell origin in parent-client pixels.
@@ -140,6 +143,18 @@ struct GroupWindow {
     /// The pointer is over the title strip (hover mix) and which title button it is over.
     strip_hot: bool,
     hot_button: Option<TitleButton>,
+    /// Published per-member title bars, plus their independent hover/capture state.
+    segments: Vec<SegmentHit>,
+    segment_hot: Option<(u64, group_paint::SegmentPart)>,
+    segment_press: Option<(u64, group_paint::SegmentPart)>,
+    segment_hover: std::collections::HashMap<u64, f64>,
+}
+
+struct SegmentHit {
+    member: u64,
+    segment: group_paint::TabSegment,
+    buttons: bool,
+    up_enabled: bool,
 }
 
 /// A hit-tested element of the title strip.
@@ -293,6 +308,11 @@ mod title_side_tests {
                 assert!(!title_below_on_screen(0, 0, auto, false, Rect::new(0, top + m.title_h + m.gap, 400, top + 300), top, &m, false));
                 // the release path is unchanged: it pushes the body down instead
                 assert!(!title_below_for_body(0, 0, auto, false, Rect::new(0, top, 400, top + 300), top, &m, false));
+                // Rounded segments must fit their 2 DIP body gap above the work area too.
+                let separated = group_paint::Metrics { gap: group_paint::px(group_paint::SEGMENT_BODY_GAP, dpi), ..m };
+                let fits = top + separated.title_h + separated.gap;
+                assert!(title_below_on_screen(0, 0, auto, false, Rect::new(0, fits - 1, 400, fits + 300), top, &separated, false));
+                assert!(!title_below_on_screen(0, 0, auto, false, Rect::new(0, fits, 400, fits + 300), top, &separated, false));
             }
         }
     }
@@ -742,6 +762,12 @@ struct App {
     tab_gesture: Option<TabGesture>,
     /// The tab whose full title is shown as a tooltip (tabs-spec 4).
     tab_tip: Option<u64>,
+    item_hover: Option<(u64, String)>,
+    item_tip: bool,
+    header_hover: Option<(u64, crate::view_state::ColumnKey)>,
+    header_press: Option<views::HeaderPress>,
+    details_rx: Option<std::sync::mpsc::Receiver<Vec<(String, details::Text)>>>,
+    list_drop_mark: Option<(u64, usize)>,
     /// `save` is held back while a tear-off is written through `commit_tab_edit`.
     tab_defer_save: bool,
     /// Armed drop zone feedback: (target Corral, insertion index among its tabs for a set).
@@ -875,6 +901,7 @@ struct PortalView {
 #[derive(Clone, Copy, Debug)]
 enum PendingPlacement {
     Group(u64),
+    GroupAt(u64, usize),
     /// Parent-client cell origin for a loose item.
     Loose((i32, i32), i32),
 }
@@ -1184,6 +1211,12 @@ impl App {
             tab_press: None,
             tab_gesture: None,
             tab_tip: None,
+            item_hover: None,
+            item_tip: false,
+            header_hover: None,
+            header_press: None,
+            details_rx: None,
+            list_drop_mark: None,
             tab_defer_save: false,
             tab_overlay: None,
             tab_fade: None,
@@ -1462,6 +1495,12 @@ impl App {
                 below: false, rolled: true, metrics: group_paint::metrics(dpi), dpi };
         }
         let mut metrics = self.group_title_metrics(group, dpi);
+        // Include the separated-bar gap when deciding whether a title still fits above
+        // the monitor edge. The stored body and the measured strip height stay intact.
+        let reserved = group_paint::strip_reserved(self.settings.label_mode, group.roll != RollState::Expanded) || group.dock_edge().is_some();
+        let separated = reserved && !self.settings.square_edges
+            && self.tab_segments_of(group, Rect::new(body.left, 0, body.right, metrics.title_h), dpi).is_some();
+        if separated { metrics.gap = group_paint::px(group_paint::SEGMENT_BODY_GAP, dpi); }
         // Corral policy: Preserve the press-time side throughout a captured move/
         // resize. Re-evaluate on release against the work area, using the full measured strip.
         let dragging = matches!(self.drag, Drag::MoveGroup { id, .. } | Drag::ResizeGroup { id, .. } if id == group.id);
@@ -1469,6 +1508,7 @@ impl App {
             title_below_on_screen(group.title_side, group.title_side_last,
                 self.settings.title_edge_auto_adjust, self.settings.outline, body, work_top - oy, &metrics, dragging)
         };
+        if below { metrics.gap = 0; }
         // A nearly empty body is shown at the minimum open height (ranges-dock-clearview-spec 4): the picture
         // and hit-testing only, the stored rect and preferred size stay as they are.
         let body = if dragging || !lift { body } else { rollup::lifted_body(body, below, dpi) };
@@ -1528,6 +1568,15 @@ impl App {
     }
 
     fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        if hwnd == self.message_window && msg == WM_TIMER && wparam.0 == details::TIMER_DETAILS {
+            self.details_ready(); return Some(LRESULT(0));
+        }
+        if self.header_press.is_some() && (matches!(msg, WM_DISPLAYCHANGE | WM_DPICHANGED | WM_CANCELMODE | WM_CAPTURECHANGED)
+            || (msg == WM_KEYDOWN && wparam.0 == 0x1b)) {
+            self.end_header_press(false);
+            if msg == WM_KEYDOWN { return Some(LRESULT(0)); }
+        }
+
         if msg==crate::camouflage::runtime::WM_READY && hwnd==self.message_window {
             // camouflage-spec 4: lparam names the one Corral whose palette or fade moved; 0 = all.
             match lparam.0 as u64 { 0 => self.rerender_camouflage(), id => self.rerender_group(id) }
@@ -1643,6 +1692,12 @@ impl App {
             return self.handle_surface(msg, wparam, lparam);
         }
         if let Some(index) = self.group_index(hwnd) {
+            if matches!(msg, WM_MOUSEMOVE | 0x02A3) {
+                self.update_item_hover(index, (msg == WM_MOUSEMOVE).then(|| lparam_point(lparam)));
+            }
+            if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MOUSEWHEEL | WM_KILLFOCUS | WM_CANCELMODE) {
+                self.hide_item_tip();
+            }
             if msg == WM_MOUSEMOVE {
                 self.update_strip_hover(index, Some(lparam_point(lparam)));
             } else if msg == 0x02A3 {
@@ -1670,6 +1725,7 @@ impl App {
             }
             if msg == 0x02A3 { self.hide_tab_tip(); }
             if msg == 0x02A1 /* WM_MOUSEHOVER */ {
+                self.item_label_tip(index, lparam_point(lparam));
                 self.tab_title_tip(index, lparam_point(lparam));
                 return Some(LRESULT(0));
             }
