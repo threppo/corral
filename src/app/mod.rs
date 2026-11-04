@@ -1531,7 +1531,7 @@ impl App {
         let style = crate::tabs::TabSettings::from(&self.settings).effective_style(group.style.tabs_style);
         // A single Corral draws as a set with one tab (`render_group`), so it has the same gap.
         let solo = group.tab.is_none() && (group_paint::TABS_SEGMENTED..=group_paint::TABS_ROUNDED).contains(&style);
-        let separated = reserved && !self.settings.square_edges && style != group_paint::TABS_FLAT
+        let separated = reserved && group_paint::segment_body_gap(style, self.settings.square_edges)
             && (solo || self.tab_segments_of(group, Rect::new(body.left, 0, body.right, metrics.title_h), dpi).is_some());
         if separated { metrics.gap = group_paint::px(group_paint::SEGMENT_BODY_GAP, dpi); }
         // Corral policy: Preserve the press-time side throughout a captured move/

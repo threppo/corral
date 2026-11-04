@@ -407,7 +407,10 @@ pub fn content(page: Page) -> PageContent {
                     Row::new(RowKind::ExploreTile, "Round-up", Some("Send new icons to the right Corral.")).to(Page::Rules),
                     Row::new(RowKind::ExploreTile, "Backups", Some("Save and restore your layout.")).to(Page::Backups),
                 ]),
-                sec("General", vec![Row::new(RowKind::Dropdown, "Create Corrals with", Some("Which mouse button draws a new Corral on the desktop.")).b(Field::CreateCorralMode)]),
+                sec("General", vec![
+                    Row::new(RowKind::Dropdown, "Create Corrals with", Some("Which mouse button draws a new Corral on the desktop.")).b(Field::CreateCorralMode),
+                    Row::new(RowKind::Toggle, "Start with Windows", Some("Corral starts as soon as you log in, ahead of your other startup apps.")).b(Field::StartWithWindows),
+                ]),
             ],
         },
         Page::Camouflage => PageContent {

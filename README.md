@@ -23,6 +23,7 @@ Corral keeps the desktop tidy with a set of building blocks you arrange yourself
 - **Round-up**: rules that send new desktop items to the right corral, with a preview before sorting.
 - **Saved desk setups**: corral placements remembered per monitor setup and restored when it returns.
   Without them, a Corral moved to fit a smaller screen goes back when the bigger one returns.
+- **Start with Windows**: a Settings option that starts Corral as soon as you log in, ahead of other startup apps.
 - **Turn Corral off**: from Settings, which hides Corrals and Gates and gives the desktop icons back to Windows.
   Turn it back on from the notification-area icon or Settings; your layout and files are not touched.
 - **Clear view**: double-click the desktop to hide corrals and icons, and again to bring them back.

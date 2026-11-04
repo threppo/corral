@@ -79,11 +79,20 @@ pub(super) fn has_segments(p: &PaintInputs) -> bool {
 fn segment_body(p: &PaintInputs) -> Option<Rect> {
     if p.folded { return None }
     let strip = p.strip?;
-    let gap = if p.square_edges || segment_style(p) == TABS_FLAT { 0 } else { px(SEGMENT_BODY_GAP, p.dpi) };
+    let gap = if segment_body_gap(segment_style(p), p.square_edges) { px(SEGMENT_BODY_GAP, p.dpi) } else { 0 };
     let body = if p.strip_above {
         Rect::new(p.outer.left, strip.bottom + gap, p.outer.right, p.outer.bottom)
     } else { Rect::new(p.outer.left, p.outer.top, p.outer.right, strip.top - gap) };
     (body.height() > 0).then_some(body)
+}
+
+/// Round tabs stand apart from the body also when the body is square; a square tab can sit on a square body.
+pub fn segment_body_gap(style: u32, square_edges: bool) -> bool {
+    match style {
+        TABS_FLAT => false,
+        TABS_ROUNDED => true,
+        _ => !square_edges,
+    }
 }
 
 fn segment_style(p: &PaintInputs) -> u32 {
@@ -95,8 +104,11 @@ fn body_radii(p: &PaintInputs) -> [f32; 4] {
     if segment_style(p) == TABS_FLAT { strip_radii(p.radius(), !p.strip_above, false) } else { [p.radius(); 4] }
 }
 
+/// Round because the tab style says so: "Rounded corners" is about the Corral's body (user report 2026-11-04).
 fn bar_radii(p: &PaintInputs) -> [f32; 4] {
-    if segment_style(p) == TABS_ROUNDED { [p.radius(); 4] } else { [0.0; 4] }
+    if segment_style(p) != TABS_ROUNDED { return [0.0; 4] }
+    let folded = p.folded.then(|| p.strip.map_or(0, |s| s.height()));
+    [corner_radius(p.outer.width(), p.outer.height(), p.dpi, false, folded); 4]
 }
 
 /// The blur mask shares exactly the fill geometry, leaving the inter-bar and body gaps transparent.

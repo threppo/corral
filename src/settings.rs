@@ -547,6 +547,8 @@ impl Default for Settings {
 pub enum Field {
     /// (virtual) `!Disabled`.
     EnableCorral,
+    /// (virtual) Windows holds this one, see `autostart`: nothing in the settings file.
+    StartWithWindows,
     CreateCorralMode,
     BlendIcons,
     /// camouflage-spec 5.4: include backgrounds, titlebars and scrollbars.
@@ -661,6 +663,7 @@ impl Settings {
         use Field::*;
         match f {
             EnableCorral => b(!self.disabled),
+            StartWithWindows => b(crate::autostart::cached()),
             CreateCorralMode => self.create_corral_with_mouse_mode as i64,
             BlendIcons => b(self.desktop_blend_icons),
             BlendBackgrounds => b(self.desktop_blend_corral_backgrounds),
@@ -761,6 +764,7 @@ impl Settings {
         let on = v != 0;
         match f {
             EnableCorral => self.disabled = !on,
+            StartWithWindows => {} // the click goes to `autostart::set`
             CreateCorralMode => self.create_corral_with_mouse_mode = v.clamp(0, 2) as u32,
             BlendIcons => self.desktop_blend_icons = on,
             BlendBackgrounds => self.desktop_blend_corral_backgrounds = on,

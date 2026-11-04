@@ -106,6 +106,13 @@ fn segment_hit_tests_route_every_button_and_never_hit_the_gaps() {
 }
 
 #[test]
+fn only_rounded_tabs_keep_their_gap_on_a_square_body() {
+    assert!(segment_body_gap(TABS_ROUNDED, true) && segment_body_gap(TABS_ROUNDED, false));
+    assert!(!segment_body_gap(TABS_SEGMENTED, true) && segment_body_gap(TABS_SEGMENTED, false));
+    assert!(!segment_body_gap(TABS_FLAT, true) && !segment_body_gap(TABS_FLAT, false));
+}
+
+#[test]
 fn rounded_segments_record_n_shapes_with_the_corral_radius_and_separate_body_mask() {
     for dpi in DPIS {
         for count in [2, 3, 5] {
@@ -122,17 +129,21 @@ fn rounded_segments_record_n_shapes_with_the_corral_radius_and_separate_body_mas
                     let mut rec = Rec::default();
                     paint_fills(&mut rec, &p).unwrap();
                     assert_eq!(rec.0.len(), count + if folded { 0 } else { 1 });
+                    // The tabs stay round whatever "Rounded corners" says; it decides the body only.
+                    let bar = corner_radius(p.outer.width(), p.outer.height(), dpi, false, folded.then_some(strip.height()));
+                    assert!(bar > 0.0);
                     for (s, op) in tabs.iter().zip(rec.0.iter().rev().take(count).rev()) {
-                        assert!(matches!(op, Op::Shape(r, radii, _) if *r == rectf(s.hit) && *radii == [p.radius(); 4]));
+                        assert!(matches!(op, Op::Shape(r, radii, _) if *r == rectf(s.hit) && *radii == [bar; 4]));
                     }
                     let mut mask = Rec::default();
                     paint_mask(&mut mask, &p).unwrap();
                     assert_eq!(mask.0.len(), rec.0.len());
                     if !folded {
-                        let Op::Shape(body, _, _) = mask.0[0] else { panic!() };
-                        assert_eq!(body.top, (strip.bottom + if square { 0 } else { px(2.0, dpi) }) as f32);
+                        let Op::Shape(body, radii, _) = mask.0[0] else { panic!() };
+                        assert_eq!(body.top, (strip.bottom + px(2.0, dpi)) as f32, "round tabs stand apart");
+                        assert_eq!(radii, [if square { 0.0 } else { bar }; 4], "the body follows the option");
                     }
-                    assert!(mask.0.iter().all(|op| matches!(op, Op::Shape(_, radii, c) if *radii == [p.radius(); 4] && c.a == 255)));
+                    assert!(mask.0.iter().rev().take(count).all(|op| matches!(op, Op::Shape(_, radii, c) if *radii == [bar; 4] && c.a == 255)));
                 }
             }
         }

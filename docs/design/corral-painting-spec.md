@@ -224,6 +224,7 @@ plus 48 DIP of title drops close, then Up, then menu. Only when a bare 48 DIP ti
 narrow cells between the strip's buttons: 2 DIP from each other and the strip's edges, 8 % fill (hover 14 %, active 22 %), a 1 px
 edge at 28 % (Flat: no edge, 6/10/14 %, with its underline; Flat and Segmented square, Rounded radius 6).
 
+Rounded tabs are round also with "Rounded corners" off, which decides the body only; they keep their 2 DIP gap to it (user report 2026-11-04).
 The Corral menu's Tabs > Tab style picks this same setting for all Corrals (user decision 2026-11-04). A single Corral is drawn as a set
 with one tab in Flat, Segmented and Rounded, so its title matches a tab set's (user decision 2026-11-04); only the drawing: it has no tab to
 reorder or tear off. In Menu only it has an ordinary title.

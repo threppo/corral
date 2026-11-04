@@ -3,6 +3,7 @@
 
 mod app;
 mod app_icon;
+mod autostart;
 mod color_state;
 mod screen_picker;
 mod creation;
@@ -115,6 +116,9 @@ fn main() {
             } else {
                 None
             };
+            if options.mode == app::Mode::Desktop && args.iter().any(|a| a == "--autostart") {
+                autostart::start_logs();
+            }
             std::process::exit(app::run(options));
         }
     }

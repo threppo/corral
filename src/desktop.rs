@@ -103,7 +103,8 @@ fn user_hides_desktop_icons() -> bool {
 
 /// `find_host`, tried until `limit` has passed: at login Explorer may not have made its desktop yet.
 pub fn wait_for_host(limit: std::time::Duration) -> Option<DesktopHost> {
-    poll_until(limit, std::time::Duration::from_millis(500), find_host)
+    // Often: at login a Corral started by the logon task is waiting, and the icons show until it hides them.
+    poll_until(limit, std::time::Duration::from_millis(100), find_host)
 }
 
 fn poll_until<T>(limit: std::time::Duration, step: std::time::Duration, mut find: impl FnMut() -> Option<T>) -> Option<T> {

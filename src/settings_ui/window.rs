@@ -1912,6 +1912,14 @@ fn disable_corral_spec() -> crate::dialog::DialogSpec {
         "Turn off",
     )
 }
+fn start_with_windows_failed(hwnd: HWND) {
+    let light = state_mut(hwnd).map(|st| st.theme.light).unwrap_or_else(|| system_theme().light);
+    crate::dialog::show(hwnd, light, crate::dialog::DialogSpec::new(
+        "Start with Windows",
+        "Windows did not accept the change, so nothing changed. Try again, or check that the Task Scheduler service is running.",
+        "OK",
+    ));
+}
 fn confirm_disable(hwnd: HWND) -> bool {
     let light = state_mut(hwnd)
         .map(|st| st.theme.light)
@@ -2135,6 +2143,14 @@ fn on_click(hwnd: HWND, point: (i32, i32)) {
                     st.settings.set(field, i64::from(on));
                     flush_look_globals(st);
                     reload_color_target(st);
+                }
+                invalidate(hwnd);
+                return;
+            }
+            if field == Field::StartWithWindows {
+                if let Err(e) = crate::autostart::set(!crate::autostart::cached()) {
+                    eprintln!("corral: Start with Windows: {e}");
+                    start_with_windows_failed(hwnd);
                 }
                 invalidate(hwnd);
                 return;
@@ -4411,6 +4427,7 @@ pub fn run_settings_window(
         RegisterClassExW(&class);
 
         let dpi = GetDpiForSystem().max(96);
+        crate::autostart::refresh();
         let loaded = settings::load_with_backup(settings_path);
         let page = initial_page(&loaded, layout_path);
         let state = Box::new(State {
