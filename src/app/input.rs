@@ -84,7 +84,7 @@ pub(super) unsafe extern "system" fn naming_proc(hwnd: HWND, msg: u32, wparam: W
         APP.with(|cell| {
             if let Ok(mut guard) = cell.try_borrow_mut() {
                 if let Some(app) = guard.as_mut() {
-                    if app.renaming.as_ref().is_some_and(|(edit, _, _)| *edit == hwnd) {
+                    if app.renaming.as_ref().is_some_and(|(edit, ..)| *edit == hwnd) {
                         app.finish_rename(wparam.0 != 0);
                     } else {
                         app.finish_naming(wparam.0 != 0);
@@ -268,12 +268,13 @@ impl App {
         self.item_at_surface_raw(point).filter(|&i| !self.qh_name_hidden(&self.items[i].shell.parsing_name))
     }
 
-    /// Loose icon cell under `point`, hidden or not (a hidden icon still counts as a double-click hit).
+    /// Loose icon cell under `point`, including Clear view-hidden icons for double-click detection.
+    /// Covered icons are absent even here; the Corral hit in `range_target_of` remains unchanged.
     fn item_at_surface_raw(&self, point: (i32, i32)) -> Option<usize> {
         let (cw, ch) = self.loose_cell();
         self.items.iter().position(|i| {
             self.group_of(&i.shell.parsing_name).is_none() && self.page_name_visible(&i.shell.parsing_name)
-                && Rect::new(i.pos.0, i.pos.1, i.pos.0 + cw, i.pos.1 + ch).contains(point.0, point.1)
+                && Rect::new(i.pos.0, i.pos.1, i.pos.0 + cw, i.pos.1 + ch).contains(point.0, point.1) && !self.loose_covered(i)
         })
     }
 
@@ -508,7 +509,7 @@ impl App {
     }
 
     fn set_selected(&mut self, name: &str, on: bool) {
-        if on && self.qh_name_hidden(name) {
+        if on && !self.name_actionable(name) {
             return;
         }
         if let Some(item) = self.items.iter_mut().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)) {
@@ -532,11 +533,12 @@ impl App {
                 .map(|g| self.group_members(g).iter().map(|i| i.shell.parsing_name.clone()).collect())
                 .unwrap_or_default(),
             None => {
+                let covered = self.covered_loose_set();
                 let loose: Vec<(usize, (i32, i32))> = self
                     .items
                     .iter()
                     .enumerate()
-                    .filter(|(_, i)| self.group_of(&i.shell.parsing_name).is_none() && self.page_name_visible(&i.shell.parsing_name))
+                    .filter(|(_, i)| self.group_of(&i.shell.parsing_name).is_none() && self.name_actionable_in(&i.shell.parsing_name, &covered))
                     .map(|(k, i)| (k, i.pos))
                     .collect();
                 selection::visual_order(&loose, self.loose_cell()).into_iter().map(|k| self.items[k].shell.parsing_name.clone()).collect()
@@ -547,9 +549,14 @@ impl App {
     /// Selected items in display order: group by group (layout order), then the loose icons. Members
     /// of groups whose body is not on screen are left out, so no verb (Delete, Enter, menus, drags)
     /// may reach them through a selection made before the group rolled up. A hover-opened rolled
-    /// group shows its body, so its members count (see `body_hidden`).
+    /// group shows its body, so its members count (see `body_hidden`). Covered loose icons are
+    /// excluded even if selected before a Corral moved over them.
     pub(super) fn selected_in_display_order(&self) -> Vec<String> {
-        let keys: Vec<String> = self.selected_keys().into_iter().filter(|k| !self.qh_name_hidden(k) && self.page_name_visible(k)).collect();
+        // Eligibility is judged on the original names (ASCII-case lookups), then keyed for comparison.
+        let covered = self.covered_loose_set();
+        let keys = super::covered_icons::actionable_keys(
+            self.items.iter().filter(|i| i.selected).map(|i| i.shell.parsing_name.as_str()),
+            |n| self.name_actionable_in(n, &covered));
         let mut order = Vec::new();
         let homes = self
             .layout
@@ -575,7 +582,7 @@ impl App {
     }
 
     /// The loose icon `name` has its cell origin on some monitor.
-    fn loose_on_screen(&self, name: &str) -> bool {
+    pub(super) fn loose_on_screen(&self, name: &str) -> bool {
         let Some(item) = self.items.iter().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)) else { return false };
         let (x, y) = self.to_screen(item.pos);
         self.monitors.iter().any(|m| m.bounds.contains(x, y))
@@ -586,10 +593,11 @@ impl App {
     pub(super) fn drag_set(&self, pressed: &str) -> Vec<String> {
         if (matches!(self.drag, Drag::Item { active: true, .. }) || self.ole_drag.is_some())
             && self.pages.drag_names.iter().any(|n| n.eq_ignore_ascii_case(pressed)) {
-            return self.pages.drag_names.clone();
+            // An accepted drag outlives navigation (its Corral can be off-page): recheck only loose sources.
+            return super::covered_icons::drag_names(pressed, &self.pages.drag_names, |n| !self.loose_name_covered(n));
         }
         let selected = self.selected_in_display_order();
-        if selected.iter().any(|n| n.eq_ignore_ascii_case(pressed)) { selected } else { vec![pressed.to_string()] }
+        super::covered_icons::drag_names(pressed, &selected, |n| self.name_actionable(n))
     }
 
     /// The selected items that fit one shell menu with `pressed`: they must share its parent folder
@@ -698,21 +706,74 @@ impl App {
     /// Ctrl+A: every visible item (loose icons and the members of unrolled groups).
     fn select_all(&mut self) {
         let before = self.selected_keys();
-        let hidden: Vec<String> = self
-            .layout
-            .groups
-            .iter()
-            .filter(|g| self.body_hidden(g.id))
-            .flat_map(|g| match &g.content {
-                GroupContent::Items { items } => items.iter().map(|n| n.to_lowercase()).collect::<Vec<_>>(),
-                GroupContent::Portal { .. } => Vec::new(),
-            })
-            .collect();
-        let qh_hidden: Vec<bool> = self.items.iter().map(|i| self.qh_name_hidden(&i.shell.parsing_name) || !self.page_name_visible(&i.shell.parsing_name)).collect();
-        for (item, qh) in self.items.iter_mut().zip(qh_hidden) {
-            item.selected = !qh && !hidden.contains(&item.shell.parsing_name.to_lowercase());
+        let covered = self.covered_loose_set();
+        let actionable: Vec<bool> = self.items.iter().map(|i| self.name_actionable_in(&i.shell.parsing_name, &covered)).collect();
+        for (item, actionable) in self.items.iter_mut().zip(actionable) {
+            item.selected = actionable;
         }
         self.repaint_selection(&before, false, None);
+    }
+
+    /// WM_CHAR on a Corral/Gate: search the keyboard navigation order by display name, retaining
+    /// the original slots for scrolling even when an unreachable item is left out.
+    pub(super) fn handle_type_ahead(&mut self, unit: u16, id: u64) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, VK_LMENU, VK_LWIN, VK_RMENU, VK_RWIN};
+        let (ctrl, lalt, ralt) = (key_down(VK_CONTROL), key_down(VK_LMENU), key_down(VK_RMENU));
+        if !super::type_ahead::is_text_char(unit, ctrl, lalt, ralt) {
+            self.type_ahead.clear();
+            return;
+        }
+        if self.naming.is_some() || self.renaming.is_some() || !matches!(self.drag, Drag::None)
+            || self.ole_drag.is_some() || self.tab_press.is_some() || self.header_press.is_some()
+            || self.draw_active() || !unsafe { GetCapture() }.is_invalid()
+            || super::ACTIVE_MENU.with(|menu| menu.borrow().is_some())
+            || [VK_LWIN, VK_RWIN].into_iter().any(key_down) {
+            self.type_ahead.clear();
+            return;
+        }
+        let Some(group) = self.layout.groups.iter().find(|g| g.id == id) else { return };
+        if self.body_hidden(id) || !self.page_group_visible(group)
+            || !crate::tabs::body_visible(&self.layout.groups, group) || self.pages.moving() {
+            self.type_ahead.clear();
+            return;
+        }
+        let order = self.container_order(Some(id));
+        let display_names: std::collections::HashMap<&str, &str> = self.items.iter()
+            .map(|i| (i.shell.parsing_name.as_str(), i.shell.display_name.as_str())).collect();
+        let candidates: Vec<(usize, &str)> = order.iter().enumerate()
+            .filter(|(_, name)| !self.qh_name_hidden(name) && self.page_name_visible(name))
+            .filter_map(|(slot, name)| display_names.get(name.as_str()).map(|&display| (slot, display)))
+            .collect();
+        let focus = self.selection.focus.as_deref().and_then(|name|
+            candidates.iter().position(|(slot, _)| order[*slot].eq_ignore_ascii_case(name)));
+        let names: Vec<&str> = candidates.iter().map(|(_, name)| *name).collect();
+        let Some(found) = self.type_ahead.input_utf16(unit, tick_ms(), &names, focus) else { return };
+        let slot = candidates[found].0;
+        let name = &order[slot];
+        let before = self.selected_keys();
+        self.clear_selection();
+        self.set_selected(name, true);
+        self.selection.anchor = Some(name.clone());
+        self.selection.focus = Some(name.clone());
+        self.scroll_item_into_view(id, slot);
+        self.repaint_selection(&before, false, Some(id));
+    }
+
+    /// Also runs before Gate/Range shortcuts consume a key, so navigation starts a new query.
+    pub(super) fn type_ahead_keydown(&mut self, vk: u16) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{VK_BACK, VK_TAB, VK_PRIOR, VK_NEXT,
+            VK_HOME, VK_END, VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_LWIN, VK_RWIN, VK_LMENU,
+            VK_RMENU, VK_LCONTROL, VK_RCONTROL};
+        // Pressing a modifier itself (AltGr between letters) must not end the query.
+        if [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LCONTROL, VK_RCONTROL, VK_LMENU, VK_RMENU].iter().any(|k| k.0 == vk) { return; }
+        // AltGr (Ctrl + right Alt) is text entry, not an accelerator chord.
+        let altgr = super::type_ahead::is_text_char(u16::from(b'a'), key_down(VK_CONTROL), key_down(VK_LMENU), key_down(VK_RMENU));
+        let chord = (key_down(VK_CONTROL) || key_down(VK_MENU)) && !altgr;
+        if chord || [VK_LWIN, VK_RWIN].into_iter().any(key_down)
+            || [VK_BACK, VK_TAB, VK_RETURN, VK_ESCAPE, VK_PRIOR, VK_NEXT, VK_HOME, VK_END,
+                VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_DELETE, VK_F2].iter().any(|k| k.0 == vk) {
+            self.type_ahead.clear();
+        }
     }
 
     /// Keyboard verbs on the selection (the surface and the groups share them): Enter opens every
@@ -720,7 +781,14 @@ impl App {
     /// Ctrl+C / Ctrl+X copy / cut the selection, Ctrl+V pastes into the desktop (into Corral `target`
     /// when the key reached a Corral, like Paste from its body menu).
     pub(super) fn handle_selection_key(&mut self, vk: u16, target: Option<u64>) -> Option<LRESULT> {
-        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_SPACE;
+        // AltGr reports as Ctrl + right Alt: on Polish layouts AltGr+A, C, X type letters, they are no shortcuts.
+        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 && unsafe { GetKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_RMENU.0 as i32) } >= 0;
+        // Space inside an active query belongs to WM_CHAR. Its usual List/Details selection
+        // action would otherwise change the selection even when the extended query has no match.
+        if target.is_some() && !ctrl && vk == VK_SPACE.0 && self.type_ahead.active(tick_ms()) {
+            return Some(LRESULT(0));
+        }
         if let Some(id) = target.filter(|id| self.group_view(*id) != crate::view_state::View::Icons) {
             use windows::Win32::UI::Input::KeyboardAndMouse::{VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_SPACE};
             if [VK_UP.0, VK_DOWN.0, VK_LEFT.0, VK_RIGHT.0, VK_HOME.0, VK_END.0, VK_PRIOR.0, VK_NEXT.0, VK_SPACE.0].contains(&vk) {
@@ -774,9 +842,11 @@ impl App {
                 self.invoke_verb(&selected, "delete");
             }
             k if k == VK_F2.0 => {
-                if let Some(name) = self.selection.focus.clone().filter(|n| self.is_selected(n) && !self.qh_name_hidden(n) && self.page_name_visible(n)
-                    && self.group_of(n).is_none_or(|id| !self.body_hidden(id))) {
-                    self.begin_rename(name);
+                let gate = target.filter(|id| self.portals.contains_key(id));
+                if let Some(name) = self.selection.focus.clone().filter(|n| self.items.iter().any(|i| i.selected && i.gate == gate && i.shell.parsing_name.eq_ignore_ascii_case(n))
+                    && self.name_actionable(n)
+                    && gate.is_none_or(|id| !self.body_hidden(id))) {
+                    self.begin_rename(name, gate);
                 }
             }
             k if k == VK_ESCAPE.0 => {
@@ -784,7 +854,7 @@ impl App {
                 self.clear_selection();
                 self.repaint_selection(&before, false, None);
             }
-            k if k == b'A' as u16 && unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0 => self.select_all(),
+            k if k == b'A' as u16 && ctrl => self.select_all(),
             _ => return None,
         }
         Some(LRESULT(0))
@@ -807,9 +877,10 @@ impl App {
     /// Marks `band_base` plus the items of `hits` (indices into `items`) as selected.
     fn select_band(&mut self, hits: &[usize]) {
         let base = std::mem::take(&mut self.selection.band_base);
-        let qh_hidden: Vec<bool> = self.items.iter().map(|i| self.qh_name_hidden(&i.shell.parsing_name)).collect();
+        let covered = self.covered_loose_set();
+        let actionable: Vec<bool> = self.items.iter().map(|i| self.name_actionable_in(&i.shell.parsing_name, &covered)).collect();
         for (k, item) in self.items.iter_mut().enumerate() {
-            item.selected = !qh_hidden[k] && (hits.contains(&k) || base.contains(&item.shell.parsing_name.to_lowercase()));
+            item.selected = actionable[k] && (hits.contains(&k) || base.contains(&item.shell.parsing_name.to_lowercase()));
         }
         self.selection.band_base = base;
     }
@@ -819,11 +890,12 @@ impl App {
         let before = self.selected_keys();
         let band = Rect::from_points(start.0, start.1, current.0, current.1);
         let (cw, ch) = self.loose_cell();
+        let covered = self.covered_loose_set();
         let cells: Vec<(usize, Rect)> = self
             .items
             .iter()
             .enumerate()
-            .filter(|(_, i)| self.group_of(&i.shell.parsing_name).is_none() && self.page_name_visible(&i.shell.parsing_name))
+            .filter(|(_, i)| self.group_of(&i.shell.parsing_name).is_none() && self.name_actionable_in(&i.shell.parsing_name, &covered))
             .map(|(k, i)| (k, Rect::new(i.pos.0, i.pos.1, i.pos.0 + cw, i.pos.1 + ch)))
             .collect();
         let hits = selection::band_hits(band, &cells);
@@ -1943,6 +2015,11 @@ impl App {
                 let delta = ((wparam.0 >> 16) & 0xffff) as i16 as i32;
                 // Ctrl + wheel zooms this Corral's icons (Corral extra); a plain wheel scrolls
                 if key_down(VK_MENU) { return None; }
+                // the body moves under an open rename edit: commit it, as losing focus does
+                if self.renaming.is_some() {
+                    self.finish_rename(true);
+                    return Some(LRESULT(0));
+                }
                 if wparam.0 & MK_CONTROL != 0 || key_down(VK_CONTROL) {
                     return self.zoom_group_icons(index, delta).then_some(LRESULT(0));
                 }

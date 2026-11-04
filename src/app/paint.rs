@@ -185,12 +185,24 @@ impl App {
 
     /// The Corral or Gate an item belongs to: a Corral by its stored list, a Gate by the folder it shows.
     pub(super) fn group_of(&self, name: &str) -> Option<u64> {
-        self.layout.group_of(name).or_else(|| self.gate_index.get(&name.to_lowercase()).copied())
+        self.layout.group_of(name).or_else(|| self.gate_index.get(&name.to_lowercase()).and_then(|v| v.last().copied()))
+    }
+
+    /// Every Corral or Gate that holds `name`: two Gates can show one folder, each with its own item.
+    pub(super) fn homes_of(&self, name: &str) -> Vec<u64> {
+        let mut homes: Vec<u64> = self.layout.group_of(name).into_iter().collect();
+        for &id in self.gate_index.get(&name.to_lowercase()).into_iter().flatten() {
+            if !homes.contains(&id) { homes.push(id); }
+        }
+        homes
     }
 
     /// Rebuild `gate_index` after Gate items changed.
     pub(super) fn index_gate_items(&mut self) {
-        self.gate_index = self.items.iter().filter_map(|i| i.gate.map(|g| (i.shell.parsing_name.to_lowercase(), g))).collect();
+        self.gate_index.clear();
+        for i in &self.items {
+            if let Some(g) = i.gate { self.gate_index.entry(i.shell.parsing_name.to_lowercase()).or_default().push(g); }
+        }
     }
 
     /// The shortcut-arrow policy of a group's icons: the global setting, or a Gate's own "Hide shortcut arrows".
@@ -435,6 +447,13 @@ impl App {
 
     pub(super) fn render_surface(&mut self) {
         if self.pages.moving() && !self.pages.snapshotting { return; }
+        let covered = self.covered_loose_set();
+        if !self.pages.snapshotting && !covered.is_empty() {
+            // Selection does not survive becoming covered; later verbs also recheck eligibility.
+            for item in &mut self.items {
+                if covered.contains(&item.shell.parsing_name.to_lowercase()) { item.selected = false; }
+            }
+        }
         let (w, h) = client_size(self.parent);
         let (sx, sy) = self.window_xy((0, 0));
         unsafe {
@@ -459,7 +478,7 @@ impl App {
             for item in self.items.iter().filter(|i| self.group_of(&i.shell.parsing_name).is_none() && self.page_name_visible(&i.shell.parsing_name)) {
                 // quick-hide fade of loose icons (exempt icons stay at 255)
                 let qh_alpha = self.qh_loose_alpha(item);
-                if qh_alpha == 0 {
+                if qh_alpha == 0 || (!covered.is_empty() && covered.contains(&item.shell.parsing_name.to_lowercase())) {
                     continue;
                 }
                 if item.selected || super::item_drag::item_drop_highlight(&item.shell.parsing_name) {
@@ -506,6 +525,7 @@ impl App {
         });
         if result.is_ok() && !self.pages.snapshotting {
             let _ = present_layered(self.surface_hwnd, &surface, self.window_xy((0, 0)), 255);
+            self.covered_loose = covered;
         }
         self.surface = surface;
         if !self.pages.snapshotting { self.quick_hide_dump_surface(); }
@@ -543,6 +563,7 @@ impl App {
             let _ = SetWindowPos(self.groups[index].hwnd, HWND::default(), wx, wy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
         self.groups[index].rect = geo.union;
+        self.repaint_loose_coverage();
         self.layout_portal_popups();
         if let Some(started) = started {
             log(&format!("camouflage-trace: position+portals group={} elapsed_ms={:.3}", group.id,
@@ -586,16 +607,15 @@ impl App {
             self.render_group_inner(index);
             log(&format!("camouflage-trace: render+present index={index} interactive={} elapsed_ms={:.3}",
                 self.groups.get(index).is_some_and(|g| self.drag.surface_interactive(g.id)) || self.preview_camouflage_moving, start.elapsed().as_secs_f64()*1000.0));
-            return;
-        }
-        // QA: CORRAL_QA_PAINT_TIMING=1 logs the duration of every group render (drag smoothness work).
-        if std::env::var_os("CORRAL_QA_PAINT_TIMING").is_some() {
+        } else if std::env::var_os("CORRAL_QA_PAINT_TIMING").is_some() {
+            // QA: opt-in duration of every group render.
             let start = std::time::Instant::now();
             self.render_group_inner(index);
             log(&format!("paint timing: group index {index} {:.1} ms", start.elapsed().as_secs_f64() * 1000.0));
-            return;
+        } else {
+            self.render_group_inner(index);
         }
-        self.render_group_inner(index);
+        self.repaint_loose_coverage();
     }
 
     fn render_group_inner(&mut self, index: usize) {

@@ -568,6 +568,10 @@ impl App {
     }
 
     pub(super) fn update_item_drag(&mut self, screen: (i32, i32)) {
+        if let Drag::Item { name, .. } = &self.drag {
+            // Only a covered loose source is cancelled; a Corral member may be off-page after a Range switch.
+            if self.loose_name_covered(name) { self.cancel_item_drag(); return; }
+        }
         let Drag::Item { start, current, active, .. } = &mut self.drag else { return };
         *current = screen;
         if !*active {
@@ -680,6 +684,7 @@ impl App {
             log("ole drag: stale state from an earlier drag discarded");
         }
         let (name, grab, start, owner) = (name.clone(), *grab, *start, *owner);
+        if self.drag_set(&name).is_empty() { self.cancel_item_drag(); return; }
         let mut cursor = POINT::default();
         if unsafe { GetCursorPos(&mut cursor) }.is_err() {
             return;
@@ -851,6 +856,7 @@ impl App {
         self.selection.release = None;
         let source = self.groups.iter().find(|g| g.hwnd == owner).map(|g| g.id);
         self.pages.drag_names.clear();
+        if names.is_empty() { return; }
         if self.alt_drop_of_items(&name, &names, screen) { return }
         self.drop_items(&name, &names, grab, start, source, screen);
     }

@@ -160,6 +160,11 @@ impl App {
         quick_hide::loose_icon_exempt(self.qh_flags(), &self.qh_exclusions(), name, &Self::qh_profile())
     }
 
+    /// The Gate/Corral `id` is invisible or fading under quick-hide: nothing in it may start an edit.
+    pub(super) fn qh_group_hidden(&self, id: u64) -> bool {
+        !self.peek.is_on() && !quick_hide::actionable(&self.quick_hide, self.qh_group_exempt(id))
+    }
+
     /// Alpha of a group window under the quick-hide fade (255 when exempt or shown).
     pub(super) fn qh_group_alpha(&self, id: u64) -> u8 {
         if self.peek.is_on() {

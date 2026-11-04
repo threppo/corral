@@ -211,6 +211,7 @@ impl App {
         if let Some(view) = self.portals.get_mut(&batch.id) { view.loaded = true; }
         self.index_gate_items();
         self.retain_group_icon_rasters();
+        self.gate_new_rename_done(batch.id);
         self.render_gate_member(batch.id);
     }
 
@@ -295,6 +296,10 @@ impl App {
                 for (msg, lparam) in DEFERRED_GATE.with(|queue| std::mem::take(&mut *queue.borrow_mut())) {
                     self.gate_window_message(msg, WPARAM(0), LPARAM(lparam));
                 }
+                Some(LRESULT(0))
+            }
+            WM_TIMER if wparam.0 == super::shell_items::GATE_NEW_RENAME_TIMER => {
+                self.poll_gate_new_rename();
                 Some(LRESULT(0))
             }
             WM_TIMER => {

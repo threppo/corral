@@ -63,6 +63,7 @@ pub struct ShellMenu {
     ctx3: Option<IContextMenu3>,
     first: u32,
     last: u32,
+    gate_new_submenu: Option<HMENU>,
 }
 
 /// Owns an absolute PIDL allocated by the Shell.
@@ -154,7 +155,7 @@ impl ShellMenu {
         let ctx2 = ctx.cast::<IContextMenu2>().ok();
         let ctx3 = ctx.cast::<IContextMenu3>().ok();
         let hmenu = menu.release();
-        Ok(ShellMenu { menu: hmenu, ctx, ctx2, ctx3, first, last })
+        Ok(ShellMenu { menu: hmenu, ctx, ctx2, ctx3, first, last, gate_new_submenu: None })
     }
 
     /// Menu for one or more items that share a parent folder (selection menu).
@@ -226,7 +227,7 @@ impl ShellMenu {
         let prefix = MenuGuard(prefix);
         let ctx = Self::background_context(owner, Some(folder))?;
         let start = unsafe { GetMenuItemCount(prefix.0) }.max(0) as u32;
-        let menu = Self::build_at(prefix.release(), ctx, CMF_NORMAL, start, GATE_BACKGROUND_FIRST_ID, GATE_BACKGROUND_LAST_ID)?;
+        let mut menu = Self::build_at(prefix.release(), ctx, CMF_NORMAL, start, GATE_BACKGROUND_FIRST_ID, GATE_BACKGROUND_LAST_ID)?;
         let count = unsafe { GetMenuItemCount(menu.menu) }.max(0) as u32;
         let mut kept = Vec::new();
         let mut remove = Vec::new();
@@ -241,7 +242,10 @@ impl ShellMenu {
             // live 2026-10-29: the New submenu item itself answers the canonical verb "New", so no extension
             // submenu is initialized just to be inspected
             match crate::portal_menu::gate_background_entry(verb.as_deref(), submenu) {
-                Some(entry) if !kept.contains(&entry) => kept.push(entry),
+                Some(entry) if !kept.contains(&entry) => {
+                    if entry == crate::portal_menu::BackgroundEntry::New { menu.gate_new_submenu = Some(info.hSubMenu); }
+                    kept.push(entry);
+                }
                 _ => remove.push(position),
             }
         }
@@ -249,6 +253,22 @@ impl ShellMenu {
             unsafe { let _ = DeleteMenu(menu.menu, position, MF_BYPOSITION); }
         }
         Ok(menu)
+    }
+
+    /// Check the populated New subtree after tracking: its children need not have canonical verbs.
+    /// The handle belongs to this menu; no labels or command-id ranges identify New's children.
+    pub fn is_gate_new(&self, id: u32) -> bool {
+        fn contains(menu: HMENU, id: u32) -> bool {
+            use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuItemID, GetSubMenu};
+            for pos in 0..unsafe { GetMenuItemCount(menu) }.max(0) {
+                let sub = unsafe { GetSubMenu(menu, pos) };
+                if !sub.is_invalid() {
+                    if contains(sub, id) { return true; }
+                } else if unsafe { GetMenuItemID(menu, pos) } == id { return true; }
+            }
+            false
+        }
+        (self.first..=self.last).contains(&id) && self.gate_new_submenu.is_some_and(|menu| contains(menu, id))
     }
 
     /// Background menu of a live shell view (`IShellView::GetItemObject(SVGIO_BACKGROUND)`): the

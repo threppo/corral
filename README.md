@@ -106,17 +106,10 @@ desktop. Start it with `--desktop` to organise the real desktop.
 
 ## Known issues
 
-- List and Details views and the Rounded tab bars have been tested in the preview window only,
-  not yet on the real desktop or on a high-DPI monitor.
-- Typing a name does not select the matching item yet.
+- With two Folder Gates on the same folder, selecting an item highlights it in both.
 - In the v0.1.0-alpha download, the Welcome page in Settings says to click a Corral's title to
   rename it, which does not work. Right-click the title and choose **Rename Corral** instead. The
   tip is corrected in the source.
-- Desktop icons that are not in a corral stay visible through a Corral or Gate placed on top
-  of them.
-- In a Folder Gate, **New > Folder** creates the folder but does not start renaming it.
-- In a Folder Gate, **Paste shortcut** does nothing for some clipboard contents (for example a
-  file list copied by some programs).
 - Opening a folder with thousands of files in a Gate for the first time froze the window for
   a few seconds once in testing. It has not happened again since.
 - The release `corral.exe` is not code-signed, so Windows SmartScreen may warn before the first run.

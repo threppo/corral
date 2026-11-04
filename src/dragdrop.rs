@@ -98,13 +98,13 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::Path;
 
-use windows::Win32::Foundation::{GlobalFree,
+use windows::Win32::Foundation::{BOOL, GlobalFree,
     DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, E_FAIL, E_INVALIDARG, HGLOBAL, HWND, POINT,
     POINTL, S_OK, SIZE,
 };
 use windows::Win32::Graphics::Gdi::{BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DeleteObject, CreateDIBSection, HBITMAP};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, DVASPECT_CONTENT, FORMATETC, IBindCtx, IDataObject, STGMEDIUM,
+    CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, DVASPECT_CONTENT, FORMATETC, IBindCtx, IDataObject, IPersistFile, STGMEDIUM,
     TYMED_HGLOBAL,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
@@ -120,7 +120,7 @@ use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     BHID_SFObject, CLSID_DragDropHelper, DragQueryFileW, FOLDERID_Desktop, HDROP, ILClone, ILCombine, ILFindLastID, ILFree,
     ILIsEqual, ILRemoveLastID, IDragSourceHelper, IDragSourceHelper2, IDropTargetHelper, IShellFolder, IShellItem, KF_FLAG_DEFAULT, SHBindToParent,
-    SHCreateItemFromParsingName, SHDRAGIMAGE, SHGetDesktopFolder, SHGetKnownFolderPath, SHGetNameFromIDList, SHParseDisplayName,
+    SHChangeNotify, SHCreateItemFromParsingName, SHGetNewLinkInfoW, IShellLinkW, ShellLink, SHCNE_CREATE, SHCNF_PATHW, SHDRAGIMAGE, SHGetDesktopFolder, SHGetKnownFolderPath, SHGetNameFromIDList, SHParseDisplayName,
     SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, IDC_ARROW, LoadCursorW, SM_SWAPBUTTON, SetCursor};
@@ -316,9 +316,52 @@ fn names_from_idlist(data: &IDataObject) -> Result<Vec<String>> {
     Ok(names_from_cida(&copy))
 }
 
-/// File paths from `CF_HDROP`.
+/// Checked DROPFILES payload offset and encoding.
+fn hdrop_payload(buf: &[u8]) -> Option<(usize, bool)> {
+    let start = read_u32(buf, 0)? as usize;
+    let wide = read_u32(buf, 16)? != 0;
+    if start < 20 || start >= buf.len() { return None; }
+    Some((start, wide))
+}
+
+/// Pure, bounded reader for a Unicode DROPFILES buffer; invalid UTF-16 is not a different path.
+fn wide_hdrop_paths(buf: &[u8]) -> Option<Vec<String>> {
+    let (mut at, wide) = hdrop_payload(buf)?;
+    if !wide { return None; }
+    let mut names = Vec::new();
+    let mut path = Vec::new();
+    loop {
+        let unit = u16::from_le_bytes([*buf.get(at)?, *buf.get(at.checked_add(1)?)?]);
+        at = at.checked_add(2)?;
+        if unit != 0 {
+            path.push(unit);
+        } else if !path.is_empty() {
+            names.push(String::from_utf16(&path).ok()?);
+            path.clear();
+        } else {
+            // An empty list still has two NULs; after a name, its terminator is the first.
+            if names.is_empty() && buf.get(at..at.checked_add(2)?)? != [0, 0] { return None; }
+            return Some(names);
+        }
+    }
+}
+
+/// File paths from `CF_HDROP`, validated before reading any strings.
 fn names_from_hdrop(data: &IDataObject) -> Result<Vec<String>> {
     let medium = get_hglobal(data, CF_HDROP.0)?;
+    let size = unsafe { GlobalSize(medium.hglobal()) };
+    let ptr = unsafe { GlobalLock(medium.hglobal()) } as *const u8;
+    if ptr.is_null() { return Err(Error::from_win32()); }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+    unsafe { let _ = GlobalUnlock(medium.hglobal()); }
+    let (start, wide) = hdrop_payload(&bytes).ok_or_else(|| invalid("malformed file list"))?;
+    if wide {
+        return wide_hdrop_paths(&bytes).ok_or_else(|| invalid("malformed Unicode file list"));
+    }
+    // Keep DragQueryFileW's Windows code-page conversion for legacy ANSI lists.
+    if !bytes[start..].windows(2).any(|pair| pair == [0, 0]) {
+        return Err(invalid("unterminated ANSI file list"));
+    }
     let hdrop = HDROP(medium.hglobal().0);
     let count = unsafe { DragQueryFileW(hdrop, u32::MAX, None) };
     let mut names = Vec::new();
@@ -643,21 +686,124 @@ fn shell_drop_target(dest: &Destination, owner: HWND) -> Result<(IDropTarget, Op
     }
 }
 
-/// "Paste shortcut" (Explorer does it the same way): the clipboard's items dropped on `folder` with only
-/// LINK allowed, so the folder's own drop target makes the shortcuts and nothing is copied or moved.
-pub fn paste_link_into(owner: HWND, folder: &str) -> Result<()> {
-    let data = unsafe { OleGetClipboard()? };
-    let (target, _) = shell_drop_target(&Destination::Folder(folder.to_string()), owner)?;
+/// Whether a clipboard name is worth offering. Only a CF_HDROP path that is definitely gone is stale:
+/// shell names (`::`) and names only the Shell ID list carries (`\\SERVER`, `C:\a.zip\member.txt`)
+/// stay with the folder to judge, and an unreadable path (access denied) is not treated as missing.
+fn link_name_usable(name: &str, from_hdrop: bool) -> bool {
+    !from_hdrop || name.starts_with("::") || !matches!(Path::new(name).try_exists(), Ok(false))
+}
+
+/// Clipboard names that still resolve, and whether all of them do.
+fn usable_link_names(names: &[String], from_hdrop: bool) -> (Vec<String>, bool) {
+    let usable: Vec<String> = names.iter().filter(|name| link_name_usable(name, from_hdrop)).cloned().collect();
+    let all_usable = usable.len() == names.len();
+    (usable, all_usable)
+}
+
+/// Clipboard names, preferring CF_HDROP file paths (so stale entries can be skipped); the flag tells
+/// whether they came from CF_HDROP. An empty or unreadable file list falls back to the Shell ID list.
+fn clipboard_link_names(data: &IDataObject) -> (Vec<String>, bool) {
+    match names_from_hdrop(data) {
+        Ok(names) if !names.is_empty() => (names, true),
+        _ => (read_source_names(data), false),
+    }
+}
+
+/// Usable clipboard items, preferring file paths so stale CF_HDROP entries can be skipped.
+fn paste_link_items(data: &IDataObject) -> (Vec<String>, bool) {
+    let (names, from_hdrop) = clipboard_link_names(data);
+    usable_link_names(&names, from_hdrop)
+}
+
+/// Enable Paste shortcut only while at least one clipboard item still resolves (stops at the first).
+pub fn clipboard_has_link_items() -> bool {
+    unsafe { OleGetClipboard() }.is_ok_and(|data| {
+        let (names, from_hdrop) = clipboard_link_names(&data);
+        names.iter().any(|name| link_name_usable(name, from_hdrop))
+    })
+}
+
+/// False means negotiation refused, before Drop could perform any work. Never retry after Drop.
+fn drop_link(target: &IDropTarget, data: &IDataObject) -> Result<bool> {
     // Ctrl+Shift is the Shell's "make a link" key state; without it the folder's default (move/copy) is masked to none
     let keys = MODIFIERKEYS_FLAGS(MK_LBUTTON.0 | MK_CONTROL.0 | MK_SHIFT.0);
+    // Safety invariant: every attempt offers ONLY LINK, never COPY or MOVE, even on retry.
     let mut effect = DROPEFFECT_LINK;
-    unsafe { target.DragEnter(&data, keys, POINTL::default(), &mut effect)? };
-    if effect.0 & DROPEFFECT_LINK.0 == 0 {
+    let entered = unsafe { target.DragEnter(data, keys, POINTL::default(), &mut effect) };
+    if entered.is_err() || effect != DROPEFFECT_LINK {
         let _ = unsafe { target.DragLeave() };
-        return Err(Error::new(E_FAIL, "the folder makes no shortcuts to these items"));
+        return Ok(false);
     }
     let mut effect = DROPEFFECT_LINK;
-    unsafe { target.Drop(&data, keys, POINTL::default(), &mut effect) }
+    unsafe { target.Drop(data, keys, POINTL::default(), &mut effect)? };
+    if effect != DROPEFFECT_LINK { return Err(err("the folder did not accept the shortcuts")); }
+    Ok(true)
+}
+
+/// Creates one shortcut to `target` in `dir`, named by the Shell's SHGetNewLinkInfoW (`note.txt` gives `note.lnk`, `app.exe` gives `app.lnk`; a number is added when taken).
+/// Never overwrites: the name is checked again right before saving.
+fn create_shortcut(target: &str, dir: &str) -> Result<()> {
+    let mut name = [0u16; 260];
+    let mut must_copy = BOOL(0);
+    let target_w = HSTRING::from(target);
+    let dir_w = HSTRING::from(dir);
+    if !unsafe { SHGetNewLinkInfoW(&target_w, &dir_w, &mut name, &mut must_copy, 0) }.as_bool() {
+        return Err(Error::from_win32());
+    }
+    if must_copy.as_bool() { return Err(err("this item cannot have a shortcut")); }
+    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    let path = HSTRING::from_wide(&name[..len])?;
+    if Path::new(&path.to_string()).exists() { return Err(err("a file with the shortcut's name already exists")); }
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+        link.SetPath(&target_w)?;
+        // "Start in": programs that load files relative to their folder need it
+        if Path::new(target).is_file() {
+            if let Some(parent) = Path::new(target).parent().filter(|p| !p.as_os_str().is_empty()) {
+                link.SetWorkingDirectory(&HSTRING::from(parent.as_os_str()))?;
+            }
+        }
+        let persist: IPersistFile = link.cast()?;
+        persist.Save(&path, true)?;
+        SHChangeNotify(SHCNE_CREATE, SHCNF_PATHW, Some(path.as_ptr() as *const c_void), None);
+    }
+    Ok(())
+}
+
+/// Shortcuts for the file paths in `names` through `create`; every path is tried once.
+/// Returns (created, failed); an error only when nothing was created.
+fn create_shortcuts_with(names: &[String], dir: &str, mut create: impl FnMut(&str, &str) -> Result<()>) -> Result<(usize, usize)> {
+    let paths: Vec<&String> = names.iter().filter(|n| !n.starts_with("::")).collect();
+    if paths.is_empty() { return Err(invalid("the clipboard has no usable files")); }
+    let (mut created, mut failed) = (0, 0);
+    let mut first_error = None;
+    for path in paths {
+        match create(path, dir) {
+            Ok(()) => created += 1,
+            Err(e) => { failed += 1; first_error.get_or_insert(e); }
+        }
+    }
+    match first_error {
+        Some(e) if created == 0 => Err(e),
+        _ => Ok((created, failed)),
+    }
+}
+
+fn create_shortcuts(names: &[String], dir: &str) -> Result<(usize, usize)> {
+    create_shortcuts_with(names, dir, create_shortcut)
+}
+
+/// The folder's own target creates the shortcuts when it accepts LINK for the clipboard's data object;
+/// otherwise (plain file lists) they are created directly. No clipboard replacement or file copy/move.
+/// Returns (created, failed) shortcut counts; an error means nothing was created.
+pub fn paste_link_into(owner: HWND, folder: &str) -> Result<(usize, usize)> {
+    let data = unsafe { OleGetClipboard()? };
+    let (names, all_usable) = paste_link_items(&data);
+    if names.is_empty() { return Err(invalid("the clipboard has no usable files")); }
+    let (target, dir) = shell_drop_target(&Destination::Folder(folder.to_string()), owner)?;
+    if all_usable && drop_link(&target, &data)? { return Ok((names.len(), 0)); }
+    let Some(dir) = dir else { return Err(err("the folder is not a file-system folder")) };
+    create_shortcuts(&names, &dir)
 }
 
 /// Expected names of the dropped items inside `dir` (see [`Dropped::expected_destinations`]).
@@ -1691,6 +1837,58 @@ mod tests {
     use super::*;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn usable_link_names_skip_stale_paths() {
+        let here = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        let names = vec![here.clone(), r"C:\no\such\corral-file.txt".to_string(), "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".to_string()];
+        let (usable, all) = usable_link_names(&names, true);
+        assert_eq!(usable, vec![here, names[2].clone()]);
+        assert!(!all);
+        assert!(usable_link_names(&[], true).1);
+        // names only the Shell ID list carries are left to the folder
+        let (usable, all) = usable_link_names(&names, false);
+        assert_eq!(usable.len(), 3);
+        assert!(all);
+    }
+
+    #[test]
+    fn create_shortcuts_reports_partial_success() {
+        let names = vec!["a.txt".to_string(), "b.lnk".to_string()];
+        let r = create_shortcuts_with(&names, "d", |p, _| if p == "a.txt" { Ok(()) } else { Err(err("refused")) }).unwrap();
+        assert_eq!(r, (1, 1));
+        assert!(create_shortcuts_with(&names, "d", |_, _| Err(err("refused"))).is_err());
+        assert_eq!(create_shortcuts_with(&names, "d", |_, _| Ok(())).unwrap(), (2, 0));
+    }
+
+    #[test]
+    fn create_shortcuts_makes_unique_links_without_overwriting() {
+        let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
+        let dir = std::env::temp_dir().join(format!("corral-paste-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let names = vec![file.to_string_lossy().into_owned()];
+        let dir_s = dir.to_string_lossy().into_owned();
+        create_shortcuts(&names, &dir_s).unwrap();
+        create_shortcuts(&names, &dir_s).unwrap();
+        let mut links: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.to_ascii_lowercase().ends_with(".lnk")).collect();
+        links.sort();
+        assert_eq!(links.len(), 2, "{links:?}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"x");
+        unsafe {
+            use windows::Win32::System::Com::STGM_READ;
+            let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+            let persist: IPersistFile = link.cast().unwrap();
+            persist.Load(&HSTRING::from(dir.join(&links[0]).as_os_str()), STGM_READ).unwrap();
+            let mut buf = [0u16; 260];
+            link.GetWorkingDirectory(&mut buf).unwrap();
+            let len = buf.iter().position(|&c| c == 0).unwrap();
+            assert_eq!(String::from_utf16_lossy(&buf[..len]).to_ascii_lowercase(), dir.to_string_lossy().to_ascii_lowercase());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use windows::Win32::Foundation::DRAGDROP_E_ALREADYREGISTERED;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, IAdviseSink};
     use windows::Win32::System::Memory::{GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc};
@@ -1700,6 +1898,131 @@ mod tests {
         WINDOW_EX_STYLE, WS_OVERLAPPED,
     };
     use windows::core::{AsImpl, w};
+
+    fn wide_file_list(paths: &[&str]) -> Vec<u8> {
+        let mut bytes = vec![0; 20];
+        bytes[..4].copy_from_slice(&20u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1u32.to_le_bytes());
+        for path in paths {
+            for unit in path.encode_utf16().chain(Some(0)) { bytes.extend(unit.to_le_bytes()); }
+        }
+        if paths.is_empty() { bytes.extend([0, 0]); }
+        bytes.extend([0, 0]);
+        bytes
+    }
+
+    #[test]
+    fn paste_shortcut_hdrop_wide_multiple_paths_and_padding() {
+        let paths = [r"C:\one\zażółć.txt", r"D:\other\🎵.mp3"];
+        let mut bytes = wide_file_list(&paths);
+        bytes.extend([0xFF; 7]); // GlobalSize may include unused allocation padding.
+        assert_eq!(wide_hdrop_paths(&bytes).unwrap(), paths);
+    }
+
+    #[test]
+    fn paste_shortcut_hdrop_empty_list() {
+        assert_eq!(wide_hdrop_paths(&wide_file_list(&[])), Some(vec![]));
+    }
+
+    #[test]
+    fn paste_shortcut_hdrop_rejects_bad_headers() {
+        let bytes = wide_file_list(&[r"C:\one.txt"]);
+        for len in 0..20 { assert!(wide_hdrop_paths(&bytes[..len]).is_none()); }
+        for offset in [0, 4, 19, bytes.len() as u32, u32::MAX] {
+            let mut bad = bytes.clone();
+            bad[..4].copy_from_slice(&offset.to_le_bytes());
+            assert!(wide_hdrop_paths(&bad).is_none(), "offset {offset}");
+        }
+        let mut ansi = bytes;
+        ansi[16..20].fill(0);
+        assert!(wide_hdrop_paths(&ansi).is_none());
+    }
+
+    #[test]
+    fn paste_shortcut_hdrop_rejects_truncated_lists() {
+        let bytes = wide_file_list(&[r"C:\one.txt", r"D:\two.txt"]);
+        for len in 20..bytes.len() { assert!(wide_hdrop_paths(&bytes[..len]).is_none(), "length {len}"); }
+        let empty = wide_file_list(&[]);
+        assert!(wide_hdrop_paths(&empty[..22]).is_none());
+    }
+
+    #[test]
+    fn paste_shortcut_hdrop_rejects_invalid_utf16() {
+        let mut bytes = wide_file_list(&["x"]);
+        bytes[20..22].copy_from_slice(&0xD800u16.to_le_bytes());
+        assert!(wide_hdrop_paths(&bytes).is_none());
+    }
+
+    #[test]
+    fn paste_shortcut_hdrop_reads_nondefault_unaligned_offset() {
+        let mut bytes = wide_file_list(&[r"C:\one.txt"]);
+        bytes.insert(20, 0xFF);
+        bytes[..4].copy_from_slice(&21u32.to_le_bytes());
+        assert_eq!(wide_hdrop_paths(&bytes).unwrap(), [r"C:\one.txt"]);
+    }
+
+    #[implement(IDropTarget)]
+    struct LinkTestTarget {
+        calls: Rc<RefCell<Vec<&'static str>>>,
+        enter_effect: DROPEFFECT,
+        drop_effect: DROPEFFECT,
+        fail_enter: bool,
+        fail_drop: bool,
+    }
+
+    impl IDropTarget_Impl for LinkTestTarget_Impl {
+        fn DragEnter(&self, _: Option<&IDataObject>, keys: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
+            self.calls.borrow_mut().push("enter");
+            assert_eq!(unsafe { *effect }, DROPEFFECT_LINK);
+            assert_eq!(keys.0, MK_LBUTTON.0 | MK_CONTROL.0 | MK_SHIFT.0);
+            unsafe { *effect = self.enter_effect; }
+            if self.fail_enter { Err(err("enter refused")) } else { Ok(()) }
+        }
+        fn DragOver(&self, _: MODIFIERKEYS_FLAGS, _: &POINTL, _: *mut DROPEFFECT) -> Result<()> { panic!("unexpected DragOver") }
+        fn DragLeave(&self) -> Result<()> { self.calls.borrow_mut().push("leave"); Ok(()) }
+        fn Drop(&self, _: Option<&IDataObject>, keys: MODIFIERKEYS_FLAGS, _: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
+            self.calls.borrow_mut().push("drop");
+            assert_eq!(unsafe { *effect }, DROPEFFECT_LINK);
+            assert_eq!(keys.0, MK_LBUTTON.0 | MK_CONTROL.0 | MK_SHIFT.0);
+            unsafe { *effect = self.drop_effect; }
+            if self.fail_drop { Err(err("drop failed")) } else { Ok(()) }
+        }
+    }
+
+    #[test]
+    fn paste_shortcut_drop_offers_link_only() {
+        let calls = Rc::new(RefCell::new(vec![]));
+        let target: IDropTarget = LinkTestTarget { calls: calls.clone(), enter_effect: DROPEFFECT_LINK,
+            drop_effect: DROPEFFECT_LINK, fail_enter: false, fail_drop: false }.into();
+        let data: IDataObject = HdropOnly { paths: vec![] }.into();
+        assert!(drop_link(&target, &data).unwrap());
+        assert_eq!(*calls.borrow(), ["enter", "drop"]);
+    }
+
+    #[test]
+    fn paste_shortcut_refusal_leaves_without_dropping() {
+        for (effect, fail_enter) in [(DROPEFFECT_NONE, false), (DROPEFFECT_COPY, false),
+            (DROPEFFECT_MOVE, false), (ALL_EFFECTS, false), (DROPEFFECT_LINK, true)] {
+            let calls = Rc::new(RefCell::new(vec![]));
+            let target: IDropTarget = LinkTestTarget { calls: calls.clone(), enter_effect: effect,
+                drop_effect: DROPEFFECT_LINK, fail_enter, fail_drop: false }.into();
+            let data: IDataObject = HdropOnly { paths: vec![] }.into();
+            assert!(!drop_link(&target, &data).unwrap());
+            assert_eq!(*calls.borrow(), ["enter", "leave"]);
+        }
+    }
+
+    #[test]
+    fn paste_shortcut_drop_failure_is_an_error_not_a_retryable_refusal() {
+        for (effect, fail_drop) in [(DROPEFFECT_NONE, false), (DROPEFFECT_LINK, true)] {
+            let calls = Rc::new(RefCell::new(vec![]));
+            let target: IDropTarget = LinkTestTarget { calls: calls.clone(), enter_effect: DROPEFFECT_LINK,
+                drop_effect: effect, fail_enter: false, fail_drop }.into();
+            let data: IDataObject = HdropOnly { paths: vec![] }.into();
+            assert!(drop_link(&target, &data).is_err());
+            assert_eq!(*calls.borrow(), ["enter", "drop"]);
+        }
+    }
 
     #[test]
     fn q38b_shell_store_round_trips_arbitrary_private_formats_without_touching_file_formats() {

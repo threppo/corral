@@ -27,6 +27,44 @@ const MENU_PASTE: u32 = 0x9004;
 const MENU_ROUND_UP_DECIDE: u32 = 0x9005;
 const MENU_PASTE_LINK: u32 = 0x9006;
 
+pub(super) const GATE_NEW_RENAME_TIMER: usize = 0x4780_0000;
+const GATE_NEW_RENAME_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub(super) struct GateNewRename {
+    gate: u64,
+    folder: String,
+    probe_seq: u64,
+    before: Vec<String>,
+    at: std::time::Instant,
+    /// Wall-clock start of the command: the new item must have been created at or after it.
+    started: std::time::SystemTime,
+    retry: bool,
+}
+
+/// shortcut: the Shell reports no identity for what New created, so the one new listing entry is
+/// accepted when its creation time is not before the command; another program creating a single file
+/// after the command and before the listing is still taken for New's, upgrade to an
+/// IObjectWithSite identity from the invoked IContextMenu if that is ever seen live.
+fn created_since(created: std::time::SystemTime, started: std::time::SystemTime) -> bool {
+    // file times come from a coarse system clock that can lag `SystemTime::now` by a few ms
+    created + std::time::Duration::from_millis(250) >= started
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum NewName<'a> { Wait, Rename(&'a str), Cancel }
+
+/// A complete listing must add exactly one identity; removals do not make it ambiguous.
+fn gate_new_name<'a>(before: &[String], after: &'a [String], elapsed: std::time::Duration) -> NewName<'a> {
+    if elapsed >= GATE_NEW_RENAME_LIMIT { return NewName::Cancel; }
+    let known: HashSet<_> = before.iter().map(|name| name.to_lowercase()).collect();
+    let mut new = after.iter().filter(|name| !known.contains(&name.to_lowercase()));
+    match (new.next(), new.next()) {
+        (None, _) => NewName::Wait,
+        (Some(name), None) => NewName::Rename(name),
+        _ => NewName::Cancel,
+    }
+}
+
 /// The clipboard holds files or shell items (what the desktop's Paste accepts).
 fn clipboard_has_files() -> bool {
     use windows::Win32::System::DataExchange::{IsClipboardFormatAvailable, RegisterClipboardFormatW};
@@ -208,7 +246,8 @@ impl App {
     }
 
     /// Show a shell item menu; "rename" is not delegated to the shell (Corral renders items).
-    pub(super) fn show_item_menu(&mut self, owner: HWND, names: Vec<String>, client_point: (i32, i32)) {
+    pub(super) fn show_item_menu(&mut self, owner: HWND, mut names: Vec<String>, client_point: (i32, i32)) {
+        names.retain(|n| self.name_actionable(n));
         if names.is_empty() {
             return;
         }
@@ -232,13 +271,16 @@ impl App {
         }
         let screen = self.to_screen(client_point);
         if let Some(id) = Self::track(&menu, owner, screen) {
+            // The modal menu pumps messages: geometry can change while it is open.
+            if names.iter().any(|n| !self.name_actionable(n)) { return; }
             if any_manual && id == MENU_ROUND_UP_DECIDE {
                 self.let_round_up_decide(&names);
                 return;
             }
             if menu.is_rename(id) {
                 if let [name] = names.as_slice() {
-                    self.begin_rename(name.clone());
+                    let home = self.groups.iter().find(|g| g.hwnd == owner).map(|g| g.id);
+                    self.begin_rename(name.clone(), home);
                 }
                 return;
             } else if let Err(e) = menu.invoke(owner, id, screen, false, false) {
@@ -265,7 +307,7 @@ impl App {
             }
         }
         for name in names {
-            let _ = shell::open_item(name);
+            if self.name_actionable(name) { let _ = shell::open_item(name); }
         }
         true
     }
@@ -284,7 +326,7 @@ impl App {
     }
 
     fn invoke_verb_on(&mut self, names: &[String], verb: &str) {
-        if names.is_empty() {
+        if names.is_empty() || names.iter().any(|n| !self.name_actionable(n)) {
             return;
         }
         let Ok(menu) = ShellMenu::for_items(self.surface_hwnd, names) else { return };
@@ -303,37 +345,66 @@ impl App {
         log(&format!("verb {verb} not offered for {names:?}"));
     }
 
-    /// In-place rename edit over a loose item's label (Explorer-style F2 / menu Rename).
-    pub(super) fn begin_rename(&mut self, name: String) {
-        let Some(item) = self.items.iter().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(&name)) else { return };
-        if self.group_of(&name).is_some() {
-            return; // renaming inside groups is not supported yet
+    /// In-place rename edit over a loose item's or Gate item's label (Explorer-style F2 / menu Rename).
+    /// `home` is the container the request came from; two Gates may show the same folder, so a Gate
+    /// item is only taken from that Gate.
+    pub(super) fn begin_rename(&mut self, name: String, home: Option<u64>) {
+        self.cancel_gate_new_rename();
+        if self.renaming.is_some() || self.naming.is_some() { return; }
+        if !self.name_actionable(&name) { return; }
+        let gate = home.filter(|id| self.portals.contains_key(id));
+        // The window the edit opens in: the Gate the input came from, or the Corral holding the item.
+        let container = gate.or_else(|| self.layout.group_of(&name));
+        if let Some(id) = container {
+            let Some(g) = self.layout.groups.iter().find(|g| g.id == id) else { return };
+            if self.body_hidden(id) || self.qh_group_hidden(id) || !crate::tabs::body_visible(&self.layout.groups, g) || !self.page_layer_visible(g) { return; }
+            let Some(slot) = self.group_members(g).iter().position(|i| i.shell.parsing_name.eq_ignore_ascii_case(&name)) else { return };
+            let before = g.scroll;
+            self.scroll_item_into_view(id, slot);
+            // the edit opens over what is painted, so show the scrolled body first
+            if self.layout.groups.iter().find(|g| g.id == id).is_some_and(|g| g.scroll != before) {
+                if let Some(index) = self.groups.iter().position(|g| g.id == id) { self.render_group(index); }
+            }
         }
+        let Some(item) = self.items.iter().find(|i| i.gate == gate && i.shell.parsing_name.eq_ignore_ascii_case(&name)) else { return };
         let (cw, _) = self.loose_cell();
-        let dpi = self.dpi();
-        let label_top = item.pos.1 + self.icon_px + to_px(8, dpi);
+        let dpi = container.map_or_else(|| self.dpi(), |id| self.group_dpi(id));
         let height = to_px(22, dpi);
+        let (rect, owner) = if let Some(id) = container {
+            let Some(g) = self.layout.groups.iter().find(|g| g.id == id) else { return };
+            let Some(gw) = self.groups.iter().find(|g| g.id == id) else { return };
+            let Some(slot) = self.group_members(g).iter().position(|i| i.shell.parsing_name.eq_ignore_ascii_case(&name)) else { return };
+            let grid = self.group_grid(id, dpi, gw.body, g.scroll);
+            let label = grid.slot(slot).label;
+            (Rect::new(label.left, label.top, label.right, (label.top + height).min(grid.body.bottom))
+                .offset(gw.rect.left, gw.rect.top), gw.hwnd)
+        } else {
+            let top = item.pos.1 + self.icon_px + to_px(8, dpi);
+            (Rect::new(item.pos.0, top, item.pos.0 + cw, top + height), self.surface_hwnd)
+        };
+        if rect.width() <= 0 || rect.height() <= 0 { return; }
         let text = item.shell.display_name.clone();
         unsafe {
             let font = CreateFontW(-(style::LABEL_FONT_PX as i32 * dpi as i32 / 96), 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, &HSTRING::from(style::FONT));
-            let Ok(edit) = self.create_edit(&text, WINDOW_STYLE(0x0001 | 0x0080), Rect::new(item.pos.0, label_top, item.pos.0 + cw, label_top + height), self.surface_hwnd)
+            let Ok(edit) = self.create_edit(&text, WINDOW_STYLE(0x0001 | 0x0080), rect, owner)
             else {
                 return;
             };
             SendMessageW(edit, WM_SETFONT, WPARAM(font.0 as usize), LPARAM(1));
-            SendMessageW(edit, EM_SETSEL, WPARAM(0), LPARAM(-1));
+            let end = rename_selection_end(&name, &text, item.shell.is_folder).map_or(-1, |n| n as isize);
+            SendMessageW(edit, EM_SETSEL, WPARAM(0), LPARAM(end));
             let _ = SetWindowSubclass(edit, Some(naming_proc), 2, 0);
             let (z, z_extra) = self.peek_edit_zorder(); // HWND_TOP unless Peek is on
             let _ = SetWindowPos(edit, z, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | z_extra);
             let _ = SetFocus(edit);
-            self.renaming = Some((edit, name, font));
+            self.renaming = Some((edit, name, font, gate, text, item.shell.is_folder));
         }
     }
 
     /// Commit an item rename through IFileOperation (shell semantics: undo, conflicts, extension
     /// handling) and move Corral's references to the item's new parsing name.
     pub(super) fn finish_rename(&mut self, commit: bool) {
-        let Some((edit, old_name, font)) = self.renaming.take() else { return };
+        let Some((edit, old_name, font, gate, old_display, is_folder)) = self.renaming.take() else { return };
         let mut buffer = [0u16; 260];
         let len = unsafe { GetWindowTextW(edit, &mut buffer) };
         let new_text = String::from_utf16_lossy(&buffer[..len.max(0) as usize]).trim().to_string();
@@ -341,35 +412,41 @@ impl App {
             let _ = DestroyWindow(edit);
             let _ = DeleteObject(HGDIOBJ(font.0));
         }
-        let old_display = self.items.iter().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(&old_name)).map(|i| i.shell.display_name.clone());
-        if !commit || new_text.is_empty() || old_display.as_deref() == Some(new_text.as_str()) {
+        if !commit || !self.name_actionable(&old_name) || new_text.is_empty() || old_display == new_text {
             return;
         }
         let before: Vec<String> = self.items.iter().map(|i| i.shell.parsing_name.to_lowercase()).collect();
-        if let Err(e) = rename_with_shell(self.surface_hwnd, &old_name, &new_text) {
+        let target = rename_target(&old_name, &old_display, &new_text, is_folder);
+        if let Err(e) = rename_with_shell(self.surface_hwnd, &old_name, &target) {
             log(&format!("rename failed: {e}"));
             return;
         }
+        if let Some(id) = gate {
+            self.reload_gate(id);
+            return; // Gate items have no Desktop layout references to move.
+        }
         // Find the renamed item (new parsing name, same folder) and carry the references over.
         let after = self.enumerate_app_items();
-        if let Some(renamed) = after.iter().find(|i| !before.contains(&i.parsing_name.to_lowercase()) && i.display_name == new_text) {
+        let after_names: Vec<String> = after.iter().map(|i| i.parsing_name.clone()).collect();
+        if let Some(renamed) = renamed_parsing_name(&old_name, &target, &before, &after_names) {
             let group = self.group_of(&old_name);
             let loose = self.layout.loose_position(&old_name).cloned();
-            if let Some(id) = group {
-                let index = self.layout.groups.iter().find(|g| g.id == id).and_then(|g| match &g.content {
-                    GroupContent::Items { items } => items.iter().position(|i| i.eq_ignore_ascii_case(&old_name)),
-                    GroupContent::Portal { .. } => None,
-                });
-                self.layout.insert_item(&renamed.parsing_name, id, index.unwrap_or(usize::MAX));
-                self.layout.assign_item(&old_name, None);
-            } else if let Some(position) = loose {
-                self.layout.place_loose(&renamed.parsing_name, position);
-            }
-            if group.is_none() { self.layout.rename_icon_page(&old_name, &renamed.parsing_name); }
-            else { self.layout.set_icon_page(&old_name, 0); }
+            let index = group.and_then(|id| self.layout.groups.iter().find(|g| g.id == id)).and_then(|g| match &g.content {
+                GroupContent::Items { items } => items.iter().position(|i| i.eq_ignore_ascii_case(&old_name)),
+                GroupContent::Portal { .. } => None,
+            });
+            // drop the old spelling first: a case-only rename shares its key with the new one
+            self.layout.assign_item(&old_name, None);
             self.layout.loose.remove(&old_name.to_lowercase());
+            if let Some(id) = group {
+                self.layout.insert_item(&renamed, id, index.unwrap_or(usize::MAX));
+            } else if let Some(position) = loose {
+                self.layout.place_loose(&renamed, position);
+            }
+            if group.is_none() { self.layout.rename_icon_page(&old_name, &renamed); }
+            else { self.layout.set_icon_page(&old_name, 0); }
             // renamed here, in Corral: the new name keeps the old name's Round-up standing
-            self.carry_round_up_state(&old_name, &renamed.parsing_name);
+            self.carry_round_up_state(&old_name, &renamed);
             self.record_desk_edit(); // the loose position moved to the new name (spec 3.2)
             self.save();
         }
@@ -425,6 +502,7 @@ impl App {
     }
 
     fn show_gate_background_menu(&mut self, id: u64, client_point: (i32, i32)) {
+        self.cancel_gate_new_rename();
         let Some(folder) = self.portal_current_path(id).map(str::to_string) else { return };
         let owner = self.groups.iter().find(|g| g.id == id).map(|g| g.hwnd).unwrap_or(self.surface_hwnd);
         let (prefix, tab_members, start) = unsafe {
@@ -450,7 +528,8 @@ impl App {
             }).unwrap_or(count);
             let flags = MF_BYPOSITION | MF_STRING | if clipboard_has_files() { MF_ENABLED } else { MF_GRAYED };
             let _ = InsertMenuW(hmenu, paste_at, flags, MENU_PASTE as usize, w!("Paste"));
-            let _ = InsertMenuW(hmenu, paste_at + 1, flags, MENU_PASTE_LINK as usize, w!("Paste shortcut"));
+            let link_flags = MF_BYPOSITION | MF_STRING | if crate::dragdrop::clipboard_has_link_items() { MF_ENABLED } else { MF_GRAYED };
+            let _ = InsertMenuW(hmenu, paste_at + 1, link_flags, MENU_PASTE_LINK as usize, w!("Paste shortcut"));
         }
         let screen = self.to_screen(client_point);
         let Some(choice) = Self::track(&menu, owner, screen) else { return };
@@ -459,13 +538,109 @@ impl App {
             self.schedule_item_reload();
         } else if choice == MENU_PASTE_LINK {
             // the folder's background menu accepts "pastelink" but does nothing (it is a view command in Explorer)
-            if let Err(e) = crate::dragdrop::paste_link_into(owner, &folder) { log(&format!("Gate paste shortcut failed: {e}")); }
+            match crate::dragdrop::paste_link_into(owner, &folder) {
+                Ok((_, 0)) => {}
+                Ok((created, failed)) => {
+                    log(&format!("Gate paste shortcut: {created} created, {failed} failed"));
+                    crate::dialog::notice(owner, crate::dialog::system_light(), "Some shortcuts weren't created",
+                        &format!("Created {created} shortcut(s). {failed} item(s) couldn't have a shortcut here, for example a shortcut file or an item that no longer exists."));
+                }
+                Err(e) => {
+                    log(&format!("Gate paste shortcut failed: {e}"));
+                    crate::dialog::notice(owner, crate::dialog::system_light(), "Couldn't paste shortcuts",
+                        "The clipboard has no usable files, or this folder couldn't create shortcuts to them. Copy the files again and try Paste shortcut.");
+                }
+            }
             self.schedule_item_reload();
         } else if (crate::shell_menu::GATE_BACKGROUND_FIRST_ID..=crate::shell_menu::GATE_BACKGROUND_LAST_ID).contains(&choice) {
-            if let Err(e) = menu.invoke(owner, choice, screen, false, false) { log(&format!("Gate invoke failed: {e}")); }
+            let pending = self.portals.get(&id).filter(|v| menu.is_gate_new(choice) && v.loaded && !v.probe_pending && v.error.is_none())
+                .map(|v| GateNewRename {
+                    gate: id, folder: folder.clone(), probe_seq: v.probe_seq,
+                    before: self.items.iter().filter(|i| i.gate == Some(id)).map(|i| i.shell.parsing_name.clone()).collect(),
+                    at: std::time::Instant::now(), started: std::time::SystemTime::now(), retry: false,
+                });
+            match menu.invoke(owner, choice, screen, false, false) {
+                Ok(()) => {
+                    self.gate_new_rename = pending;
+                    if self.gate_new_rename.is_some() {
+                        unsafe { let _ = SetTimer(self.message_window, GATE_NEW_RENAME_TIMER, 200, None); }
+                        self.reload_gate(id);
+                    }
+                }
+                Err(e) => log(&format!("Gate invoke failed: {e}")),
+            }
             self.schedule_item_reload();
         } else {
             self.portal_menu_command(id, choice as usize, &tab_members);
+        }
+    }
+
+    pub(super) fn cancel_gate_new_rename(&mut self) {
+        if self.gate_new_rename.take().is_some() {
+            unsafe { let _ = KillTimer(self.message_window, GATE_NEW_RENAME_TIMER); }
+        }
+    }
+
+    /// Cancel before input can open another menu, start a drag/rename or switch tabs. Checking on
+    /// every message also catches hidden/removed Gates and navigation before a later listing arrives.
+    pub(super) fn check_gate_new_rename(&mut self, msg: u32) {
+        let Some(pending) = &self.gate_new_rename else { return };
+        // An incoming Explorer drag or another application's menu need not send us a button press.
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON};
+        let button = |vk: i32| unsafe { GetAsyncKeyState(vk) } < 0;
+        let mut gui = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        let menu = unsafe { GetGUIThreadInfo(0, &mut gui) }.is_ok() && gui.flags.0 & (GUI_INMENUMODE.0 | GUI_POPUPMENUMODE.0) != 0;
+        let valid = pending.at.elapsed() < GATE_NEW_RENAME_LIMIT
+            && self.portals.get(&pending.gate).is_some_and(|v| v.probe_seq == pending.probe_seq
+                && !v.probe_pending && v.error.is_none() && crate::portal::same_folder(&v.current, &pending.folder))
+            && self.layout.groups.iter().any(|g| g.id == pending.gate && !self.body_hidden(g.id)
+                && crate::tabs::body_visible(&self.layout.groups, g) && self.page_layer_visible(g))
+            && !self.qh_group_hidden(pending.gate)
+            // Corral still has the foreground: a preview's Gates are child windows, so never compare with the Gate's own hwnd.
+            && { let mut pid = 0u32; unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut pid)); } pid == std::process::id() }
+            && matches!(self.drag, super::Drag::None) && self.ole_drag.is_none()
+            && !button(VK_LBUTTON.0 as i32) && !button(VK_MBUTTON.0 as i32) && !button(VK_RBUTTON.0 as i32) && !menu
+            && self.naming.is_none() && self.renaming.is_none();
+        if !valid || matches!(msg, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_MBUTTONDOWN
+            | WM_XBUTTONDOWN | WM_CONTEXTMENU | WM_KEYDOWN | WM_SYSKEYDOWN | WM_ENTERMENULOOP | WM_ENTERSIZEMOVE) {
+            self.cancel_gate_new_rename();
+        }
+    }
+
+    pub(super) fn poll_gate_new_rename(&mut self) {
+        self.check_gate_new_rename(WM_TIMER);
+        if let Some(pending) = &mut self.gate_new_rename {
+            if pending.retry {
+                pending.retry = false;
+                let id = pending.gate;
+                self.reload_gate(id);
+            }
+        }
+    }
+
+    pub(super) fn gate_new_rename_done(&mut self, id: u64) {
+        self.check_gate_new_rename(0);
+        let Some(pending) = &self.gate_new_rename else { return };
+        if pending.gate != id { return; }
+        let names: Vec<_> = self.items.iter().filter(|i| i.gate == Some(id)).map(|i| i.shell.parsing_name.clone()).collect();
+        match gate_new_name(&pending.before, &names, pending.at.elapsed()) {
+            NewName::Wait => self.gate_new_rename.as_mut().unwrap().retry = true,
+            NewName::Cancel => self.cancel_gate_new_rename(),
+            NewName::Rename(name) => {
+                let name = name.to_string();
+                let started = self.gate_new_rename.as_ref().map(|p| p.started);
+                self.cancel_gate_new_rename();
+                // no identity from the Shell: an entry older than the command is not New's
+                let created = std::fs::metadata(&name).and_then(|m| m.created()).ok();
+                if !started.zip(created).is_some_and(|(s, c)| created_since(c, s)) { return; }
+                let before = self.selected_keys();
+                for item in &mut self.items { item.selected = item.gate == Some(id) && item.shell.parsing_name == name; }
+                self.selection.anchor = Some(name.clone());
+                self.selection.focus = Some(name.clone());
+                self.selection.release = None;
+                self.begin_rename(name, Some(id));
+                self.repaint_selection(&before, false, Some(id));
+            }
         }
     }
 
@@ -571,7 +746,51 @@ fn qa_answer() -> Option<MESSAGEBOX_RESULT> {
     }
 }
 
-/// Rename through the shell (undoable; the shell applies extension/conflict rules).
+/// The name to give the file when the user typed `typed` for an item shown as `display`. With extensions hidden
+/// (including .lnk and .url, always hidden) the edit shows no extension and `RenameItem` takes its name literally,
+/// so the old one is carried over, as Explorer does. A display name that is not file name minus extension
+/// (a folder, a virtual item) leaves the typed text alone. A file whose display name is localized (not
+/// its name minus extension) keeps its extension too, unless the display name shows it.
+fn rename_target(parsing_name: &str, display: &str, typed: &str, is_folder: bool) -> String {
+    if is_folder || parsing_name.starts_with("::") { return typed.to_string(); }
+    let path = std::path::Path::new(parsing_name);
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) if !display.to_lowercase().ends_with(&format!(".{}", ext.to_lowercase())) => format!("{typed}.{ext}"),
+        _ => typed.to_string(),
+    }
+}
+
+/// The parsing name the renamed item has in `after`, from its folder and the `target` name given to the shell.
+/// An exact-case match comes first (a case-only rename), then a case-insensitive one; both must be a new
+/// entry or the old item itself. Failing that, the single new entry in the same folder (the shell resolved
+/// a conflict by keeping both, `x (2)`). `before` holds the lowercased parsing names from before the rename.
+fn renamed_parsing_name(old: &str, target: &str, before: &[String], after: &[String]) -> Option<String> {
+    let parent = |p: &str| std::path::Path::new(p).parent().map(|d| d.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let old_parent = parent(old);
+    let old_key = old.to_lowercase();
+    let wanted = std::path::Path::new(old).parent().map_or_else(|| target.to_string(), |d| d.join(target).to_string_lossy().into_owned());
+    let wanted_key = wanted.to_lowercase();
+    let usable = |name: &String| { let key = name.to_lowercase(); key == wanted_key && (key == old_key || !before.contains(&key)) };
+    after.iter().find(|n| **n == wanted && usable(n))
+        .or_else(|| after.iter().find(|n| usable(n)))
+        .or_else(|| {
+            let mut fresh = after.iter().filter(|n| parent(n) == old_parent && !before.contains(&n.to_lowercase()));
+            fresh.next().filter(|_| fresh.next().is_none())
+        })
+        .cloned()
+}
+
+/// Where the rename edit's selection ends, in UTF-16 units: before a visible extension, as Explorer selects it.
+/// `None` selects everything.
+fn rename_selection_end(parsing_name: &str, display: &str, is_folder: bool) -> Option<usize> {
+    if is_folder { return None; }
+    let path = std::path::Path::new(parsing_name);
+    let file = path.file_name()?.to_str()?;
+    let stem = path.file_stem()?.to_str()?;
+    (file.eq_ignore_ascii_case(display) && path.extension().is_some() && !stem.is_empty()).then(|| stem.encode_utf16().count())
+}
+
+/// Rename through the shell (undoable; the shell applies conflict rules; `new_name` is taken literally).
 fn rename_with_shell(owner: HWND, parsing_name: &str, new_name: &str) -> windows::core::Result<()> {
     use windows::Win32::UI::Shell::{FOF_ALLOWUNDO, FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName};
     unsafe {
@@ -604,6 +823,60 @@ pub(super) fn move_with_shell(owner: HWND, parsing_names: &[String], folder: &st
         }
         if queued == 0 { return Ok(()) }
         operation.PerformOperations()
+    }
+}
+
+#[cfg(test)]
+mod new_name_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn names(values: &[&str]) -> Vec<String> { values.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn creation_before_the_command_is_not_news_result() {
+        use std::time::{SystemTime, Duration};
+        let t = SystemTime::now();
+        assert!(created_since(t, t));
+        assert!(created_since(t - Duration::from_millis(100), t));
+        assert!(created_since(t + Duration::from_secs(2), t));
+        assert!(!created_since(t - Duration::from_secs(3), t));
+    }
+
+    #[test]
+    fn names_are_case_insensitive() {
+        assert_eq!(gate_new_name(&names(&["Folder\\Ä.TXT"]), &names(&["folder\\ä.txt"]), Duration::ZERO), NewName::Wait);
+    }
+
+    #[test]
+    fn no_new_name_keeps_waiting() {
+        assert_eq!(gate_new_name(&names(&["old"]), &names(&["old"]), Duration::ZERO), NewName::Wait);
+        assert_eq!(gate_new_name(&names(&["old"]), &[], Duration::ZERO), NewName::Wait);
+    }
+
+    #[test]
+    fn one_new_name_is_returned_with_its_original_spelling() {
+        let after = names(&["old", "New folder"]);
+        assert_eq!(gate_new_name(&names(&["old"]), &after, Duration::from_millis(4999)), NewName::Rename("New folder"));
+    }
+
+    #[test]
+    fn two_new_names_cancel_the_request() {
+        assert_eq!(gate_new_name(&names(&["old"]), &names(&["old", "a", "b"]), Duration::ZERO), NewName::Cancel);
+    }
+
+    #[test]
+    fn timeout_cancels_even_when_one_new_name_arrives() {
+        for elapsed in [Duration::from_secs(5), Duration::from_secs(6)] {
+            assert_eq!(gate_new_name(&[], &names(&["new"]), elapsed), NewName::Cancel);
+            assert_eq!(gate_new_name(&[], &[], elapsed), NewName::Cancel);
+        }
+    }
+
+    #[test]
+    fn removed_name_and_one_new_name_are_unambiguous() {
+        let after = names(&["kept", "new.txt"]);
+        assert_eq!(gate_new_name(&names(&["removed", "kept"]), &after, Duration::ZERO), NewName::Rename("new.txt"));
     }
 }
 
@@ -677,5 +950,61 @@ mod raster_tests {
         cache.retain(2, &[key(96)].into_iter().collect());
         assert_eq!(cache.owner, 2);
         assert!(cache.entries.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod rename_name_tests {
+    use super::*;
+
+    #[test]
+    fn a_hidden_extension_survives_a_rename() {
+        assert_eq!(rename_target(r"C:\d\report.pdf", "report", "budget", false), "budget.pdf");
+        assert_eq!(rename_target(r"C:\d\Gra.lnk", "Gra", "Nowa", false), "Nowa.lnk");
+        assert_eq!(rename_target(r"C:\d\Łódź.url", "Łódź", "Kraków", false), "Kraków.url");
+        assert_eq!(rename_target(r"C:\d\a.tar.gz", "a.tar", "b", false), "b.gz");
+    }
+
+    #[test]
+    fn a_localized_file_name_keeps_its_extension() {
+        assert_eq!(rename_target(r"C:\d\Browser.lnk", "Przegladarka", "Bar", false), "Bar.lnk");
+    }
+
+    #[test]
+    fn a_visible_extension_folder_or_virtual_item_takes_the_text_as_typed() {
+        assert_eq!(rename_target(r"C:\d\report.pdf", "report.pdf", "budget.txt", false), "budget.txt");
+        assert_eq!(rename_target(r"C:\d\REPORT.PDF", "report.pdf", "budget.txt", false), "budget.txt");
+        assert_eq!(rename_target(r"C:\d\Folder", "Folder", "Nowy", true), "Nowy");
+        assert_eq!(rename_target(r"C:\d\my.folder", "Localized", "Nowy", true), "Nowy");
+        assert_eq!(rename_target("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "This PC", "Nowy", false), "Nowy");
+    }
+
+    fn lower(values: &[&str]) -> Vec<String> { values.iter().map(|s| s.to_lowercase()).collect() }
+    fn raw(values: &[&str]) -> Vec<String> { values.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn the_renamed_item_is_found_by_folder_and_name() {
+        let old = r"C:\d\a.txt";
+        // plain rename
+        assert_eq!(renamed_parsing_name(old, "b.txt", &lower(&[old, r"C:\d\z.txt"]), &raw(&[r"C:\d\b.txt", r"C:\d\z.txt"])).as_deref(), Some(r"C:\d\b.txt"));
+        // case-only rename with non-ASCII letters: the key was already known
+        let old = r"C:\d\Łódź.txt";
+        assert_eq!(renamed_parsing_name(old, "ŁÓDŹ.txt", &lower(&[old]), &raw(&[r"C:\d\ŁÓDŹ.txt"])).as_deref(), Some(r"C:\d\ŁÓDŹ.txt"));
+        // conflict kept both: the name differs from the target
+        let old = r"C:\d\a.txt";
+        assert_eq!(renamed_parsing_name(old, "x.txt", &lower(&[old, r"C:\d\x.txt"]), &raw(&[r"C:\d\x.txt", r"C:\d\x (2).txt"])).as_deref(), Some(r"C:\d\x (2).txt"));
+        // nothing new: no match
+        assert_eq!(renamed_parsing_name(old, "x.txt", &lower(&[old, r"C:\d\x.txt"]), &raw(&[r"C:\d\x.txt"])), None);
+        // two new entries in the folder are ambiguous
+        assert_eq!(renamed_parsing_name(old, "x.txt", &lower(&[old]), &raw(&[r"C:\d\p.txt", r"C:\d\q.txt"])), None);
+    }
+
+    #[test]
+    fn the_edit_selects_the_stem_of_a_visible_extension_only() {
+        assert_eq!(rename_selection_end(r"C:\d\report.pdf", "report.pdf", false), Some(6));
+        assert_eq!(rename_selection_end(r"C:\d\Łódź.txt", "Łódź.txt", false), Some(4));
+        assert_eq!(rename_selection_end(r"C:\d\report.pdf", "report", false), None, "hidden: all of it");
+        assert_eq!(rename_selection_end(r"C:\d\my.folder", "my.folder", true), None);
+        assert_eq!(rename_selection_end(r"C:\d\.gitignore", ".gitignore", false), None);
     }
 }

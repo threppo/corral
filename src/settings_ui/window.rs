@@ -25,7 +25,7 @@ use super::look_pages::{self, Action as LookAction, ColorChannel, ColorChoice, S
 use super::rules_dialog::{self, EditOutcome};
 use super::rules_page::{self, Action, GroupInfo};
 use super::{
-    Hit, Page, Theme, View, apply_choice, apply_click, hit_test, max_scroll_with, nav_width, sc,
+    Hit, Page, Theme, View, apply_choice, apply_click, hit_test, nav_width, sc,
 };
 use crate::color_state::{
     self, ColorEdit, TintMode,
@@ -60,6 +60,7 @@ struct State {
     dpi: u32,
     theme: Theme,
     surface: Option<Surface>,
+    caption_visible: bool,
     look_drag: Option<(SliderKind, i32, i32)>,
     look_dirty: Option<SliderKind>,
     look_last_send: Option<std::time::Instant>,
@@ -355,6 +356,14 @@ fn point_of(l: LPARAM) -> (i32, i32) {
 }
 
 fn invalidate(hwnd: HWND) {
+    // Covers page/scroll/reflow, settings/gates, scope/backups/rules, focus reveal,
+    // captions/status and theme/DPI changes, including partial slider repaints.
+    super::uia::invalidate(hwnd);
+    repaint(hwnd);
+}
+
+/// Hover/pressed visuals and asynchronous preview frames do not change UIA metadata.
+fn repaint(hwnd: HWND) {
     // SAFETY: valid window; whole client.
     unsafe {
         let _ = InvalidateRect(hwnd, None, false);
@@ -779,9 +788,9 @@ fn focus_refresh(hwnd: HWND) {
     if let Some(index) = st.focus_index.filter(|i| *i < targets.len()) {
         let (hit, r) = targets[index];
         if !matches!(hit, Hit::Nav(_)) {
-            let max =
-                max_scroll_with(&st.settings, &st.groups, st.view.page, st.dpi, w, h).unwrap_or(0);
-            st.view.scroll = focused_scroll(st.view.page, hit, r, st.dpi, h, st.view.scroll, max);
+            let max = page_max_scroll(st, w, h);
+            let viewport = h - super::caption_bottom_padding(st.dpi, status_caption(st).is_some());
+            st.view.scroll = focused_scroll(st.view.page, hit, r, st.dpi, viewport, st.view.scroll, max);
             clamp_scroll(st, hwnd);
             targets = super::focus_targets_with(
                 &display_settings(st),
@@ -805,10 +814,32 @@ fn focus_refresh(hwnd: HWND) {
     invalidate(hwnd);
 }
 
+fn status_caption(st: &State) -> Option<(String, bool)> {
+    displayed_caption(st.view.page, st.page.caption(), &st.notice)
+}
+
+fn page_max_scroll(st: &State, width: i32, height: i32) -> i32 {
+    let Ok(content) = super::content_height_with(
+        &st.settings, &st.groups, st.view.page, st.dpi, width, height,
+    ) else { return 0 };
+    super::scroll_with_bottom_padding(
+        content,
+        height,
+        super::caption_bottom_padding(st.dpi, status_caption(st).is_some()),
+    )
+}
+
+fn caption_contains(st: &State, point: (i32, i32), width: i32, height: i32) -> bool {
+    let bar = super::caption_bar_rect(st.dpi, width, height);
+    status_caption(st).is_some()
+        && point.0 as f32 >= bar.left && (point.0 as f32) < bar.right
+        && point.1 as f32 >= bar.top && (point.1 as f32) < bar.bottom
+}
+
 fn clamp_scroll(st: &mut State, hwnd: HWND) {
     sync_look_state(st);
     let (w, h) = client_size(hwnd);
-    let max = max_scroll_with(&st.settings, &st.groups, st.view.page, st.dpi, w, h).unwrap_or(0);
+    let max = page_max_scroll(st, w, h);
     st.view.scroll = st.view.scroll.clamp(0, max);
 }
 
@@ -1309,6 +1340,13 @@ fn paint(hwnd: HWND, st: &mut State) {
     if w <= 0 || h <= 0 {
         return;
     }
+    let caption = status_caption(st);
+    let caption_changed = st.caption_visible != caption.is_some();
+    if caption_changed {
+        // Captions can disappear asynchronously; discard their extra scroll range on this frame.
+        clamp_scroll(st, hwnd);
+    }
+    st.caption_visible = caption.is_some();
     let size_ok = st
         .surface
         .as_ref()
@@ -1337,7 +1375,7 @@ fn paint(hwnd: HWND, st: &mut State) {
         return;
     };
     let shown_look = st.page.effective();
-    let partial = if let Some(kind) = st.look_dirty.take().filter(|_| size_ok) {
+    let partial = if let Some(kind) = st.look_dirty.take().filter(|_| size_ok && !caption_changed) {
         matches!(
             super::render_look_slider_row(
                 surface,
@@ -1364,6 +1402,29 @@ fn paint(hwnd: HWND, st: &mut State) {
             Some(&shown_look),
         );
     }
+    if let Some((caption, error)) = caption {
+        let bar = super::caption_bar_rect(st.dpi, w, h);
+        let theme = super::kit::theme::Theme::new(st.theme.light);
+        let _ = surface.draw(|ctx| {
+            ctx.fill_rect(bar, st.theme.panel_bg)?;
+            ctx.fill_rect(
+                RectF::new(bar.left, bar.top, bar.right, bar.top + 1.0),
+                theme.border_subtle,
+            )?;
+            ctx.draw_text(
+                &caption,
+                RectF::new(
+                    bar.left + sc(24.0, st.dpi) as f32,
+                    bar.top + 1.0,
+                    bar.right - sc(40.0, st.dpi) as f32,
+                    bar.bottom,
+                ),
+                &super::kit::theme::Type::Caption.style(
+                    st.dpi, if error { theme.danger } else { theme.secondary },
+                ),
+            )
+        });
+    }
     let mut ps = PAINTSTRUCT::default();
     // SAFETY: standard BeginPaint/EndPaint pair; the surface DC is a live memory DC of the same size.
     unsafe {
@@ -1380,40 +1441,6 @@ fn paint(hwnd: HWND, st: &mut State) {
             r.top,
             SRCCOPY,
         );
-        // The colour page's caption (colour-state-spec 3.4, 6): the error in the danger colour.
-        let caption = matches!(st.view.page, Page::Personalization | Page::Camouflage)
-            .then(|| st.page.caption().map(|c| (c.text(), c.is_error())))
-            .flatten()
-            .or_else(|| (!st.notice.is_empty()).then(|| (st.notice.clone(), false)));
-        if let Some((caption, error)) = caption {
-            use windows::Win32::Graphics::Gdi::{
-                DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DrawTextW, SetBkMode, SetTextColor,
-                TRANSPARENT,
-            };
-            let _ = SetBkMode(hdc, TRANSPARENT);
-            let danger = super::kit::theme::Theme::new(st.theme.light).danger;
-            SetTextColor(
-                hdc,
-                windows::Win32::Foundation::COLORREF(if error {
-                    u32::from(danger.r) | (u32::from(danger.g) << 8) | (u32::from(danger.b) << 16)
-                } else {
-                    0x0080_8080
-                }),
-            );
-            let mut text: Vec<u16> = caption.encode_utf16().collect();
-            let mut rect = RECT {
-                left: nav_width(st.dpi) + sc(16.0, st.dpi),
-                top: h - sc(26.0, st.dpi),
-                right: w - sc(12.0, st.dpi),
-                bottom: h,
-            };
-            DrawTextW(
-                hdc,
-                &mut text,
-                &mut rect,
-                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
-            );
-        }
         let _ = EndPaint(hwnd, &ps);
     }
     let lay = if st.view.page == Page::Camouflage {
@@ -1895,6 +1922,9 @@ fn on_click(hwnd: HWND, point: (i32, i32)) {
     let (hit, dpi, width, height, scroll, page) = {
         let st = unsafe { &*state_ptr(hwnd) };
         let (w, h) = client_size(hwnd);
+        if caption_contains(st, point, w, h) {
+            return;
+        }
         let hit = hit_test(
             &display_settings(st),
             st.view.page,
@@ -1975,14 +2005,13 @@ fn on_click(hwnd: HWND, point: (i32, i32)) {
                                 header.right,
                                 header.bottom + 16.0,
                             );
-                            let max = max_scroll_with(&st.settings, &st.groups, page, st.dpi, w, h)
-                                .unwrap_or(0) as f32
-                                / scale;
+                            let max = page_max_scroll(st, w, h) as f32 / scale;
+                            let viewport = h - super::caption_bottom_padding(st.dpi, status_caption(st).is_some());
                             st.view.scroll = (super::kit::layout::expand_scroll(
                                 offset / scale,
                                 header,
                                 first,
-                                h as f32 / scale,
+                                viewport as f32 / scale,
                                 max,
                             ) * scale)
                                 .round() as i32;
@@ -3631,8 +3660,150 @@ fn rules_action(hwnd: HWND, action: Action) {
     }
 }
 
+// UIA only reads owned copies, outside input/paint callbacks and their nested modal loops.
+pub(super) fn displayed_caption(
+    page: Page,
+    caption: Option<&Caption>,
+    notice: &str,
+) -> Option<(String, bool)> {
+    matches!(page, Page::Personalization | Page::Camouflage)
+        .then(|| caption.map(|c| (c.text(), c.is_error())))
+        .flatten()
+        .or_else(|| (!notice.is_empty()).then(|| (notice.to_owned(), false)))
+}
+
+pub(super) fn uia_attached(hwnd: HWND) -> bool {
+    !state_ptr(hwnd).is_null()
+}
+
+pub(super) fn uia_input(hwnd: HWND) -> Option<super::uia::Input> {
+    let ptr = state_ptr(hwnd);
+    if ptr.is_null() {
+        return None;
+    }
+    // Caller has checked STA ownership and the UIA busy guard. No call out in this scope.
+    let st = unsafe { &*ptr };
+    Some(super::uia::Input {
+        settings: display_settings(st),
+        groups: st.groups.clone(),
+        view: st.view,
+        dpi: st.dpi,
+        focus_index: st.focus_index,
+        caption: displayed_caption(st.view.page, st.page.caption(), &st.notice).map(|c| c.0),
+    })
+}
+
+pub(super) fn uia_action(
+    hwnd: HWND,
+    element: &super::uia::Element,
+    command: super::uia::Command,
+) -> windows::core::Result<()> {
+    let Some(input) = uia_input(hwnd) else {
+        return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+            windows::Win32::UI::Accessibility::UIA_E_ELEMENTNOTAVAILABLE as i32,
+        )));
+    };
+    let (w, h) = client_size(hwnd);
+    let targets = super::focus_targets_with(
+        &input.settings,
+        &input.groups,
+        input.view.page,
+        input.dpi,
+        w,
+        h,
+        input.view.scroll,
+    )?;
+    if let Hit::Nav(page) = element.hit() {
+        if page != input.view.page {
+            keyboard_page(hwnd, page);
+        }
+        if let Some(st) = state_mut(hwnd) {
+            st.focus_index = Some(0);
+            st.focus_visible = true;
+        }
+    } else {
+        let point = element.point();
+        let index = targets
+            .iter()
+            .position(|(hit, _)| *hit == element.hit())
+            .or_else(|| {
+                targets.iter().position(|(_, r)| {
+                    point.0 as f32 >= r.left
+                        && (point.0 as f32) < r.right
+                        && point.1 as f32 >= r.top
+                        && (point.1 as f32) < r.bottom
+                })
+            });
+        if let Some(st) = state_mut(hwnd) {
+            st.focus_index = index;
+            st.focus_visible = true;
+        }
+    }
+    // No State reference survives SetFocus, layout, or an existing input handler.
+    unsafe {
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetFocus(hwnd);
+    }
+    focus_refresh(hwnd);
+    let element = super::uia::refreshed(hwnd, element)?;
+    super::uia::run_command(
+        hwnd,
+        &element,
+        command,
+        |key| {
+            keyboard(hwnd, key);
+        },
+        |point| on_click(hwnd, point),
+    );
+    Ok(())
+}
+
 extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_GETOBJECT {
+        if lparam.0 as i32 == windows::Win32::UI::Accessibility::UiaRootObjectId {
+            return super::uia::get_object(hwnd, wparam, lparam);
+        }
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
+    if msg == super::uia::WM_ACTION {
+        super::uia::actions(hwnd);
+        super::uia::events(hwnd);
+        return LRESULT(0);
+    }
+    let guard = super::uia::enter();
+    // These can change screen coordinates, visibility or focus without a client repaint.
+    // Do not dirty the snapshot on WM_PAINT itself: UIA reads must not cause rebuilds.
+    if matches!(
+        msg,
+        WM_WINDOWPOSCHANGED | WM_MOVE | WM_SHOWWINDOW | WM_SETFOCUS | WM_KILLFOCUS | WM_ENABLE
+    ) {
+        super::uia::invalidate(hwnd);
+    }
+    let result = window_proc_inner(hwnd, msg, wparam, lparam);
+    drop(guard);
+    super::uia::actions(hwnd);
+    // UIA's event calls can reenter. All existing State references have ended here.
+    if !matches!(
+        msg,
+        WM_PAINT
+            | WM_NCPAINT
+            | WM_ERASEBKGND
+            | WM_GETTEXT
+            | WM_GETTEXTLENGTH
+            | WM_NCHITTEST
+            | WM_SETCURSOR
+            | WM_GETMINMAXINFO
+            | WM_DESTROY
+            | WM_NCDESTROY
+            | WM_NCCREATE
+    ) {
+        super::uia::events(hwnd);
+    }
+    result
+}
+
+fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
+        super::uia::opened();
         // SAFETY: lparam is the CREATESTRUCTW of this message; lpCreateParams is our boxed State.
         unsafe {
             let cs = &*(lparam.0 as *const CREATESTRUCTW);
@@ -3705,7 +3876,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
         }
         settings::style_request::WM_PREVIEW_CHANGED => {
             if unsafe { (*ptr).view.page == Page::Camouflage } {
-                invalidate(hwnd);
+                repaint(hwnd);
             }
             return LRESULT(0);
         }
@@ -3736,7 +3907,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             return LRESULT(0);
         }
         crate::camouflage::runtime::WM_READY => {
-            invalidate(hwnd);
+            repaint(hwnd);
             return LRESULT(0);
         }
         WM_FOCUS_CORRAL => {
@@ -3936,7 +4107,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                 st.view.page,
                 Page::Rules | Page::Personalization | Page::Camouflage
             ) {
-                invalidate(hwnd);
+                repaint(hwnd);
             }
             let (w, h) = client_size(hwnd);
             let hovered = hit_test(
@@ -3951,7 +4122,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             .unwrap_or(Hit::Nothing);
             if hovered != st.hover_hit {
                 st.hover_hit = hovered;
-                invalidate(hwnd);
+                repaint(hwnd);
             }
             if !st.tracking {
                 let mut tme = TRACKMOUSEEVENT {
@@ -3966,7 +4137,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             let hover = super::nav_hit_test(p, st.dpi, h);
             if hover != st.view.hover {
                 st.view.hover = hover;
-                invalidate(hwnd);
+                repaint(hwnd);
             }
             if st.view.page == Page::Backups && backups::expanded() {
                 let tile = tile_under(st, hwnd, p);
@@ -3983,7 +4154,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                             )
                         };
                     }
-                    invalidate(hwnd);
+                    repaint(hwnd);
                 }
             }
             return LRESULT(0);
@@ -3995,7 +4166,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             st.tracking = false;
             if st.hover_hit != Hit::Nothing {
                 st.hover_hit = Hit::Nothing;
-                invalidate(hwnd);
+                repaint(hwnd);
             }
             let nav_hover = st.view.hover.take().is_some();
             let tile_hover = backups::with_view(|v| v.hover.take()).is_some();
@@ -4006,12 +4177,16 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
                     Page::Rules | Page::Personalization | Page::Camouflage
                 )
             {
-                invalidate(hwnd);
+                repaint(hwnd);
             }
             return LRESULT(0);
         }
         WM_LBUTTONDOWN => {
             let point = point_of(lparam);
+            let (w, h) = client_size(hwnd);
+            if caption_contains(unsafe { &*ptr }, point, w, h) {
+                return LRESULT(0);
+            }
             super::set_control_pointer(Some((point.0 as f32, point.1 as f32)), true);
             invalidate(hwnd);
             super::set_focus_ring(None);
@@ -4117,6 +4292,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             return LRESULT(0);
         }
         WM_DESTROY => {
+            super::uia::destroy(hwnd);
             if let Some(st) = state_mut(hwnd) {
                 if st.look_pending {
                     flush_look_globals(st);
@@ -4133,6 +4309,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             return LRESULT(0);
         }
         WM_NCDESTROY => {
+            super::uia::destroy(hwnd);
             // SAFETY: reclaim the box leaked in `run_settings_window`; the pointer is cleared first.
             unsafe {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -4202,6 +4379,7 @@ pub fn run_settings_window(
             dpi,
             theme: system_theme(),
             surface: None,
+            caption_visible: false,
             look_drag: None,
             look_dirty: None,
             look_last_send: None,
@@ -4300,7 +4478,9 @@ pub fn run_settings_window(
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            super::uia::disconnect_retired();
         }
+        super::uia::disconnect_retired();
         crate::render::release_factories();
         0
     }

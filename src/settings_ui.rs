@@ -45,6 +45,7 @@ mod rules_dialog;
 mod rules_page;
 pub(super) mod sample_corral;
 mod style_menus;
+mod uia;
 mod window;
 
 pub use rules_page::GroupInfo;
@@ -542,6 +543,25 @@ const CARD_PAD_Y: f32 = 8.5;
 const DESC_RIGHT_PAD: f32 = 38.0;
 const JOIN_GAP: f32 = 2.0;
 const PAGE_BOTTOM_PAD: f32 = 40.0; // Approved content bottom padding.
+const CAPTION_BAR_HEIGHT: f32 = 32.0; // Caption line plus 8 DIP vertical padding.
+
+pub(crate) fn caption_bottom_padding(dpi: u32, visible: bool) -> i32 {
+    if visible { sc(CAPTION_BAR_HEIGHT, dpi) } else { 0 }
+}
+
+/// Client-pixel bounds; the navigation column is never covered by a status caption.
+pub(crate) fn caption_bar_rect(dpi: u32, width: i32, height: i32) -> RectF {
+    RectF::new(
+        nav_width(dpi) as f32,
+        (height - caption_bottom_padding(dpi, true)).max(0) as f32,
+        width as f32,
+        height as f32,
+    )
+}
+
+fn scroll_with_bottom_padding(content_height: i32, height: i32, padding: i32) -> i32 {
+    (content_height + padding - height).max(0)
+}
 
 // ---------------------------------------------------------------------------------------------
 // Layout (shared by drawing, hit testing and scroll range)
@@ -1165,7 +1185,11 @@ pub fn max_scroll_with(
     width: i32,
     height: i32,
 ) -> Result<i32> {
-    Ok((content_height_with(settings, groups, page, dpi, width, height)? - height).max(0))
+    Ok(scroll_with_bottom_padding(
+        content_height_with(settings, groups, page, dpi, width, height)?,
+        height,
+        0,
+    ))
 }
 
 fn monitor_count() -> i32 {
@@ -1279,6 +1303,11 @@ pub fn hit_test(
             .unwrap_or(Hit::Nothing));
     }
     let lay = layout_page(page, settings, dpi, width as f32, height as f32, scroll)?;
+    hit_test_layout(page, point, dpi, &lay)
+}
+
+/// Geometry-only hit testing over an already measured page. No rendering or preview work.
+fn hit_test_layout(page: Page, point: (i32, i32), dpi: u32, lay: &PageLay) -> Result<Hit> {
     let (px, py) = (point.0 as f32, point.1 as f32);
     if let Some(scope) = &lay.scope {
         if let Some(hit) = look_pages::scope_hit(scope, px, py) {
@@ -2322,6 +2351,13 @@ pub fn focus_targets_with(
         return Ok(targets);
     }
     let lay = layout_page(page, settings, dpi, width as f32, height as f32, scroll)?;
+    targets.extend(focus_targets_layout(page, dpi, &lay)?);
+    Ok(targets)
+}
+
+/// Page controls in keyboard order, sharing layout with UIA measurement and the painter.
+fn focus_targets_layout(page: Page, dpi: u32, lay: &PageLay) -> Result<Vec<(Hit, RectF)>> {
+    let mut targets = Vec::new();
     if let Some((f, r)) = lay.master {
         targets.push((Hit::Toggle(f), r));
     }
@@ -2388,7 +2424,7 @@ pub fn focus_targets_with(
             } else {
                 ((r.left + 2.0) as i32, (r.top + 2.0) as i32)
             };
-            let hit = hit_test(settings, page, point, dpi, width, height, scroll)?;
+            let hit = hit_test_layout(page, point, dpi, lay)?;
             if hit != Hit::Nothing {
                 targets.push((hit, r));
             }
@@ -3458,6 +3494,33 @@ mod tests {
         assert!(page_scrolls(656.0, 655.0));
         assert!(!page_scrolls(655.0, 655.0));
         assert!(!page_scrolls(100.0, 655.0));
+    }
+
+    #[test]
+    fn caption_bar_covers_only_content_and_reserves_scaled_bottom_padding() {
+        let settings = Settings::default();
+        for dpi in [96, 120, 144, 192, 240] {
+            let (w, h) = (sc(1000.0, dpi), sc(520.0, dpi));
+            let padding = caption_bottom_padding(dpi, true);
+            let bar = caption_bar_rect(dpi, w, h);
+            assert_eq!(padding, sc(32.0, dpi));
+            assert_eq!(bar, RectF::new(
+                nav_width(dpi) as f32, (h - padding) as f32, w as f32, h as f32,
+            ));
+            assert_eq!(caption_bottom_padding(dpi, false), 0);
+            for page in [Page::Personalization, Page::Camouflage, Page::About] {
+                let content = content_height(&settings, page, dpi, w, h).unwrap();
+                let max = scroll_with_bottom_padding(content, h, padding);
+                assert_eq!(max, (content + padding - h).max(0));
+                assert_eq!(
+                    scroll_with_bottom_padding(content, h, caption_bottom_padding(dpi, false)),
+                    max_scroll(&settings, page, dpi, w, h).unwrap(),
+                );
+                assert!(content - sc(PAGE_BOTTOM_PAD, dpi) - max <= bar.top as i32);
+            }
+            assert_eq!(scroll_with_bottom_padding(h - padding, h, padding), 0);
+            assert_eq!(scroll_with_bottom_padding(h - padding + 1, h, padding), 1);
+        }
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! group rectangles in DIPs relative to the monitor work area (see model.rs).
 
 mod creation_glue;
+mod covered_icons;
 mod group_menu;
 mod hosting;
 mod input;
@@ -23,6 +24,7 @@ mod shell_items;
 mod snapshot_glue;
 mod style_glue;
 mod taskbar_item;
+mod type_ahead;
 mod zguard;
 
 use crate::creation;
@@ -782,7 +784,8 @@ struct App {
     ole_drag: Option<OleDrag>,
     naming: Option<(HWND, u64, HFONT)>,
     /// In-place rename of a desktop item: (edit window, parsing name, font).
-    renaming: Option<(HWND, String, HFONT)>,
+    /// (edit, parsing name, font, Gate, display name at the start, is_folder)
+    renaming: Option<(HWND, String, HFONT, Option<u64>, String, bool)>,
     /// Icon bitmap size and loose-icon spacing from Explorer's view (physical px).
     icon_px: i32,
     spacing: (i32, i32),
@@ -850,10 +853,12 @@ struct App {
     /// A background-menu command chosen inside a Corral body (New, Paste): the Corral, the items that
     /// existed before it, and when. The items that appear next go into that Corral.
     menu_new_target: Option<(u64, std::collections::HashSet<String>, Instant)>,
+    /// A Shell New command in a Gate is waiting for its one new item to appear.
+    gate_new_rename: Option<shell_items::GateNewRename>,
     /// Folder Portal groups: navigation state and the items of the folder currently shown.
     portals: HashMap<u64, PortalView>,
     /// Lower-case parsing name -> Gate, for the items Gates read from their folders (`App::group_of`).
-    gate_index: HashMap<String, u64>,
+    gate_index: HashMap<String, Vec<u64>>,
     /// Scrollbar popup per scrollable Corral.
     scrollbars: HashMap<u64, crate::scrollbar::Bar>,
     /// True while `restack` runs (its own z changes must not re-trigger it).
@@ -864,6 +869,10 @@ struct App {
     taskbar: taskbar_item::State,
     /// Multi-selection bookkeeping (anchor, focus, deferred release effect, band origin).
     selection: selection::State,
+    /// Loose icons covered in the last live surface paint; never persisted.
+    covered_loose: std::collections::HashSet<String>,
+    /// Incremental display-name search in the focused Corral or Gate.
+    type_ahead: type_ahead::TypeAhead,
     /// Backups engine (`app/snapshot_glue.rs`): store, cursor gate, last daily-capture error.
     snap: snapshot_glue::State,
     style_last_nonce: Option<u64>,
@@ -1036,6 +1045,13 @@ fn register_class(instance: HINSTANCE, name: PCWSTR) {
 
 /// Offer Gate navigation keys before Range switching and Corral accelerators.
 fn pre_translate(msg: &MSG) -> bool {
+    if matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        APP.with(|cell| {
+            if let Ok(mut guard) = cell.try_borrow_mut() {
+                if let Some(app) = guard.as_mut() { app.type_ahead_keydown(msg.wParam.0 as u16); }
+            }
+        });
+    }
     // Never feed input to a hidden tab.
     if APP.with(|cell| cell.try_borrow().ok().is_some_and(|g| g.as_ref().is_some_and(|app| app.inactive_tab_window(msg.hwnd))))
         && matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP | WM_CHAR | WM_MOUSEWHEEL | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP) { return true }
@@ -1264,6 +1280,7 @@ impl App {
             round_up_tracking: Default::default(),
             round_up_layout_copied: false,
             menu_new_target: None,
+            gate_new_rename: None,
             portals: HashMap::new(),
             gate_index: HashMap::new(),
             scrollbars: HashMap::new(),
@@ -1271,6 +1288,8 @@ impl App {
             peek: peek::Peek::default(),
             taskbar: taskbar_item::State::default(),
             selection: selection::State::default(),
+            covered_loose: Default::default(),
+            type_ahead: type_ahead::TypeAhead::default(),
             snap: snapshot_glue::State::default(),
             style_last_nonce: None,
             color_overlay: Default::default(),
@@ -1568,6 +1587,10 @@ impl App {
     }
 
     fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        self.check_gate_new_rename(msg);
+        if matches!(msg, WM_KILLFOCUS | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_ENTERMENULOOP | WM_CANCELMODE) {
+            self.type_ahead.clear();
+        }
         if hwnd == self.message_window && msg == WM_TIMER && wparam.0 == details::TIMER_DETAILS {
             self.details_ready(); return Some(LRESULT(0));
         }
@@ -1595,8 +1618,21 @@ impl App {
                 pos.flags = (pos.flags & !SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
             }
         }
-        if inactive && matches!(msg, WM_MOUSEMOVE | WM_MOUSEWHEEL | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_KEYDOWN | WM_CONTEXTMENU) {
+        if inactive && matches!(msg, WM_MOUSEMOVE | WM_MOUSEWHEEL | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_KEYDOWN | WM_CHAR | WM_CONTEXTMENU) {
             return Some(LRESULT(0));
+        }
+        // TranslateMessage in run() generates WM_CHAR; pre_translate leaves it for the active
+        // group window. Edit controls keep their own character handling.
+        if msg == WM_CHAR {
+            if let Some(id) = member_id {
+                // A queued character can outlive the focus; only the focused window may search.
+                if unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() } != hwnd {
+                    self.type_ahead.clear();
+                    return Some(LRESULT(0));
+                }
+                self.handle_type_ahead(wparam.0 as u16, id);
+                return Some(LRESULT(0)); // no match (or a control character) is silent
+            }
         }
         if msg == WM_DISPLAYCHANGE { self.draw_cancel(creation::CancelReason::DisplayChange); }
         if matches!(msg, WM_DISPLAYCHANGE | WM_SETTINGCHANGE) && hwnd != self.message_window {
@@ -1610,6 +1646,7 @@ impl App {
             return Some(LRESULT(0));
         }
         if msg == WM_DPICHANGED {
+            self.finish_rename(true); // the edit would stay at its old size and place
             self.draw_cancel(creation::CancelReason::DpiChange);
         }
         if msg == WM_DPICHANGED && (Some(hwnd) == self.preview_host || self.is_layer(hwnd) || hwnd == self.message_window) {

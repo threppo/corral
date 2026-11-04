@@ -605,7 +605,7 @@ impl App {
                 let _ = windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(font.0));
             }
         }
-        if let Some((edit, _, font)) = self.renaming.take() {
+        if let Some((edit, _, font, ..)) = self.renaming.take() {
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(edit);
                 let _ = windows::Win32::Graphics::Gdi::DeleteObject(windows::Win32::Graphics::Gdi::HGDIOBJ(font.0));
