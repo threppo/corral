@@ -206,25 +206,30 @@ are hit-tested before the strip's move zone; they are not keyboard stops (as the
 
 ## 7. Tab strip (`TabsStyle`, shown in the strip of a tabbed Corral)
 
-Common: tabs sit left to right in the title span (2.6), width = text + 2 x 10 DIP, clamped to 48..160 DIP, text 12 DIP, trimmed with
-an ellipsis; active tab at 100 % text alpha, inactive 70 %, hover 100 % plus plate. Plates and fills use the text colour with the
-alpha shown. Empty strip stays a move zone. When tabs exceed the span, widths shrink equally down to 48 DIP; beyond that the
-strip scrolls by whole tabs so the active tab is fully visible, and the Corral menu lists all tabs (question 8). The tab strip
+Common (user decision 2026-11-04: tabs look like the Settings preview tiles, in full width): tabs have equal widths, at least 48 DIP,
+text 12 DIP trimmed with an ellipsis; active tab at 100 % text alpha, inactive 70 %, hover 100 %. Dragging a tab moves the Corral,
+Shift-drag reorders. Beyond the 48 DIP minimum the strip scrolls by whole tabs so the active tab is fully visible, and the Corral menu lists all tabs (question 8). The tab strip
 shows only when the title shows (`LabelMode`).
 
 | Value | Name | Look |
 |---|---|---|
-| 0 | Menu only | No strip. The strip shows the active tab's name as an ordinary title; tabs are chosen from the menu |
-| 1 | Flat | Text only; the active tab has a 2 DIP bar of the text colour along the edge facing the body; hover plate 10 % |
-| 2 | Segmented | One track (strip inset 2 DIP, radius 6, 10 % fill) holding all tabs side by side; the active tab is a segment inset 2 DIP in the track (radius 4, 22 % fill) |
-| 3 | Rounded | Separate pills 4 DIP apart, height strip - 8 DIP, fully rounded; active 22 % fill, inactive 8 % fill |
+| 0 | Menu only | No tab cells. The strip shows the active tab's name as an ordinary title with an arrow after it (toward the body); a click on the arrow lists the tabs, a drag moves the Corral, a double-click on the title folds as usual (user decision 2026-11-04) |
+| 1 | Flat | Full-width square bars 2 DIP apart, joined to the body on a square seam, one outline around the whole Corral; the active bar has a 2 DIP underline of its text colour on the edge facing the body |
+| 2 | Segmented | Full-width square bars 2 DIP apart, 2 DIP above the body |
+| 3 | Rounded | Full-width bars 4 DIP apart, all corners the Corral's radius, 2 DIP above the body. The only style with rounded tabs (user decision 2026-11-04) |
 
-Rounded with room (user decisions 2026-10-29/30): one rounded title bar per tab, equal widths, 4 DIP apart, each with its
-own menu, Up and close buttons. A bar that cannot fit its buttons plus 48 DIP of title drops close, then Up, then menu;
-only when a bare 48 DIP title does not fit either does the set use the pills above.
+All three with room (user decisions 2026-10-29/30 for Rounded, 2026-11-04 for all: no space at the strip's sides): one title
+bar per tab across the whole strip, equal widths, each with its own menu, Up and close buttons. A bar that cannot fit its buttons
+plus 48 DIP of title drops close, then Up, then menu. Only when a bare 48 DIP title does not fit either does the set fall back to
+narrow cells between the strip's buttons: 2 DIP from each other and the strip's edges, 8 % fill (hover 14 %, active 22 %), a 1 px
+edge at 28 % (Flat: no edge, 6/10/14 %, with its underline; Flat and Segmented square, Rounded radius 6).
 
-`TabsColors` on: each tab uses its own Corral's effective colour (colour-state-spec 2.3). Flat bar, Segmented segment and Rounded
-pill take that colour at alpha 255 (inactive 120) with a 1 px edge in its outline mix; the tab's text colour is `auto_text` of
+The Corral menu's Tabs > Tab style picks this same setting for all Corrals (user decision 2026-11-04). A single Corral is drawn as a set
+with one tab in Flat, Segmented and Rounded, so its title matches a tab set's (user decision 2026-11-04); only the drawing: it has no tab to
+reorder or tear off. In Menu only it has an ordinary title.
+
+`TabsColors` on: each tab uses its own Corral's effective colour (colour-state-spec 2.3). Flat bar, Segmented cell and Rounded
+cell take that colour at alpha 255 (inactive 120) with a 1 px edge in its outline mix; the tab's text colour is `auto_text` of
 that fill (or its Custom colour). The strip's own overlay and shade are unchanged. Drawn by the same functions in the Tabs
 settings preview tiles.
 

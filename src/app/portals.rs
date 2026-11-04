@@ -672,6 +672,7 @@ impl App {
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, group_menu::MENU_BASE + group_menu::corral_cmd::RENAME as usize, w!("Rename Corral"));
             let _ = AppendMenuW(menu, MF_STRING, group_menu::MENU_BASE + group_menu::corral_cmd::CONFIGURE as usize, w!("Configure Corral..."));
+            crate::app_icon::set_menu_item_icon(menu, (group_menu::MENU_BASE + group_menu::corral_cmd::CONFIGURE as usize) as u32, self.group_dpi(id));
             Some(tab_members)
         }
     }

@@ -148,13 +148,8 @@ pub(super) fn draw(
                 let tw = (strip.right - strip.left - px(4.0)) / 3.0;
                 let left = (strip.left + i as f32 * (tw + px(2.0))).round();
                 let r = RectF::new(left, strip.top, left + tw, strip.bottom);
-                let radius = if row.value == 3 {
-                    6.0
-                } else if row.value == 2 {
-                    2.0
-                } else {
-                    0.0
-                };
+                // Only Rounded has rounded tabs.
+                let radius = if row.value == 3 { 6.0 } else { 0.0 };
                 ctx.fill_rounded_rect(r, px(radius), if i == 0 { t.control } else { t.border })?;
                 if row.value >= 2 {
                     ctx.stroke_rounded_rect(r, px(radius), px(1.0), t.border_strong)?;

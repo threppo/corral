@@ -3947,6 +3947,17 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
                 }
             }
         }
+        // A Corral's Tabs > Tab style changes this setting while the window is open: show it, and
+        // keep this window's next save from putting the old style back.
+        WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
+            if let Some(st) = state_mut(hwnd) {
+                let stored = settings::load_with_backup(&st.path).tabs_style;
+                if st.settings.tabs_style != stored {
+                    st.settings.tabs_style = stored;
+                    invalidate(hwnd);
+                }
+            }
+        }
         WM_TIMER if wparam.0 == TIMER_DESK_SETUP => {
             if let Some(st) = state_mut(hwnd) {
                 if st.view.page == Page::Layout && st.settings.get(Field::LayoutPreserve) == 2 {

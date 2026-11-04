@@ -443,8 +443,24 @@ pub struct TitleLayout {
     pub close: Option<Rect>,
     pub folder: Option<Rect>,
     pub text: Option<Rect>,
+    /// Menu only: the arrow after the title of a tab set.
+    pub tab_list: Option<Rect>,
     /// The span between the clusters the run is centred in.
     pub span: (i32, i32),
+}
+
+/// Room for the Menu only arrow, added to the measured title before `layout_title`.
+pub fn tab_list_room(dpi: u32) -> i32 {
+    px(GLYPH, dpi) + px(TEXT_GAP, dpi)
+}
+
+/// Splits the arrow off the end of a text box laid out with [`tab_list_room`]; a box too narrow for both keeps the text.
+pub fn with_tab_list(mut layout: TitleLayout, dpi: u32) -> TitleLayout {
+    if let Some(text) = layout.text.filter(|t| t.width() >= tab_list_room(dpi)) {
+        layout.text = Some(Rect::new(text.left, text.top, text.right - tab_list_room(dpi), text.bottom));
+        layout.tab_list = Some(Rect::new(text.right - px(GLYPH, dpi), text.top, text.right, text.bottom));
+    }
+    layout
 }
 
 /// Left to right: leading cluster (menu, Up) from 4 DIP, title run (folder glyph, 4 DIP, text) centred
@@ -520,6 +536,10 @@ pub const TABS_MENU_ONLY: u32 = 0;
 pub const TABS_FLAT: u32 = 1;
 pub const TABS_SEGMENTED: u32 = 2;
 pub const TABS_ROUNDED: u32 = 3;
+
+/// Space between neighbouring tab cells, and the alpha of the 1 px edge of Segmented and Rounded cells.
+const TAB_GAP: f64 = 2.0;
+const TAB_EDGE_PCT: u32 = 28;
 
 mod segments;
 pub use segments::*;
@@ -715,29 +735,16 @@ pub fn paint_fills(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
     paint_tab_fills(sink, p)
 }
 
-/// Fill rectangle of a tab inside the strip for the style (7).
+/// Fill rectangle of a tab inside the strip for the style (7): the cells the Settings previews show, 2 DIP apart
+/// and 2 DIP off the strip's edges; only Rounded has rounded corners.
 fn tab_shape(style: u32, tab: &TabItem, strip: Rect, dpi: u32) -> Option<(RectF, f32)> {
-    let hit = tab.hit;
-    match style {
-        TABS_FLAT => {
-            let inset = px(PLATE_INSET, dpi);
-            Some((rectf(Rect::new(hit.left + inset, strip.top + inset, hit.right - inset, strip.bottom - inset)), px(PLATE_R, dpi) as f32))
-        }
-        TABS_SEGMENTED => {
-            // The segment sits 2 DIP inside the track, which is the strip inset by 2 DIP.
-            let inset = px(PLATE_INSET, dpi);
-            let rect = Rect::new(hit.left + inset, strip.top + 2 * inset, hit.right - inset, strip.bottom - 2 * inset);
-            Some((rectf(rect), px(4.0, dpi) as f32))
-        }
-        TABS_ROUNDED => {
-            // Pills 4 DIP apart (2 DIP off each cell edge), height strip - 8 DIP, fully rounded.
-            let (h_inset, v_inset) = (px(2.0, dpi), px(4.0, dpi));
-            let rect = Rect::new(hit.left + h_inset, strip.top + v_inset, hit.right - h_inset, strip.bottom - v_inset);
-            let radius = rect.height().min(rect.width()).max(0) as f32 / 2.0;
-            Some((rectf(rect), radius))
-        }
-        _ => None,
-    }
+    let radius = match style {
+        TABS_FLAT | TABS_SEGMENTED => 0.0,
+        TABS_ROUNDED => 6.0,
+        _ => return None,
+    };
+    let (side, edge) = (px(TAB_GAP / 2.0, dpi), px(PLATE_INSET, dpi));
+    Some((rectf(Rect::new(tab.hit.left + side, strip.top + edge, tab.hit.right - side, strip.bottom - edge)), px(radius, dpi) as f32))
 }
 
 fn paint_tab_fills(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
@@ -752,12 +759,6 @@ fn paint_tab_fills(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
     let dpi = p.dpi;
     let fade = |a: u8| apply_fade(a, if p.high_contrast.is_some() { 1.0 } else { shown });
     let text = p.text_rgb();
-    if tabs.style == TABS_SEGMENTED && p.high_contrast.is_none() {
-        // One track holding all tabs.
-        let inset = px(PLATE_INSET, dpi);
-        let track = Rect::new(strip.left + inset, strip.top + inset, strip.right - inset, strip.bottom - inset);
-        sink.fill_round(rectf(track), px(6.0, dpi) as f32, rgba(text, fade(pct_alpha(10))))?;
-    }
     for tab in tabs.tabs {
         let Some((rect, radius)) = tab_shape(tabs.style, tab, strip, dpi) else { continue };
         if let Some(hc) = &p.high_contrast {
@@ -777,24 +778,23 @@ fn paint_tab_fills(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
             }
             None => {
                 let percent = match (tabs.style, tab.active, tab.hovered) {
-                    (TABS_FLAT, _, true) => 10,
-                    (TABS_FLAT, _, false) => 0,
-                    (TABS_SEGMENTED, true, _) => 22,
-                    (TABS_SEGMENTED, false, true) => 10,
-                    (TABS_SEGMENTED, false, false) => 0,
+                    (TABS_FLAT, true, _) => 14,
+                    (TABS_FLAT, false, true) => 10,
+                    (TABS_FLAT, false, false) => 6,
                     (_, true, _) => 22,
-                    // a hovered inactive pill sits between inactive (8) and active (22)
+                    // a hovered inactive cell sits between inactive (8) and active (22)
                     (_, false, true) => 14,
                     (_, false, false) => 8,
                 };
-                (Some(rgba(text, fade(pct_alpha(percent)))).filter(|c| c.a > 0), None)
+                (Some(rgba(text, fade(pct_alpha(percent)))).filter(|c| c.a > 0),
+                    (tabs.style != TABS_FLAT).then(|| rgba(text, fade(pct_alpha(TAB_EDGE_PCT)))))
             }
         };
         match tabs.style {
             TABS_FLAT => {
-                if tab.hovered && tab.own_color.is_none() {
+                if tab.own_color.is_none() {
                     if let Some(f) = fill {
-                        sink.fill_round(rect, radius, f)?;
+                        sink.fill_rect(rect, f)?;
                     }
                 }
                 if tab.active {
@@ -827,8 +827,9 @@ fn paint_tab_fills(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
 /// The 2 DIP bar of the Flat style along the edge facing the body.
 fn flat_bar(tab: &TabItem, strip: Rect, above: bool, dpi: u32) -> RectF {
     let bar = px(2.0, dpi).max(1);
+    let side = px(TAB_GAP / 2.0, dpi);
     let (top, bottom) = if above { (strip.bottom - bar, strip.bottom) } else { (strip.top, strip.top + bar) };
-    rectf(Rect::new(tab.hit.left, top, tab.hit.right, bottom))
+    rectf(Rect::new(tab.hit.left + side, top, tab.hit.right - side, bottom))
 }
 
 /// Steps 5 and 6 (3.1): the outline after every fill and after Camouflage recolouring, then glyphs and
@@ -899,6 +900,11 @@ fn paint_title_chrome(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
         _ => {
             if let (Some(text), false) = (p.layout.text, p.title.is_empty()) {
                 sink.text(p.title, rectf(text), &font, rgba(text_rgb, alpha(255, 1.0)), Align::Left)?;
+            }
+            if let Some(arrow) = p.layout.tab_list {
+                // Points to where the list opens.
+                let glyph = if p.strip_above { Glyph::Expand } else { Glyph::Collapse };
+                sink.glyph(glyph, rectf(arrow), glyph_px(dpi), rgba(text_rgb, alpha(255, 1.0)))?;
             }
         }
     }

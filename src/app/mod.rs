@@ -140,6 +140,8 @@ struct GroupWindow {
     menu_glyph: Rect,
     close_glyph: Rect,
     up_glyph: Rect,
+    /// Menu only: the arrow after the title, a click lists the tabs; empty otherwise.
+    tab_list: Rect,
     /// Visual hover only; it never selects a member.
     tab_hover: Option<u32>,
     /// The pointer is over the title strip (hover mix) and which title button it is over.
@@ -711,6 +713,8 @@ struct TabPress {
     /// The press began on the Gate's Up button (with `portal_glyph`) rather than its folder glyph.
     portal_up: bool,
     portal_glyph: bool,
+    /// Pressed on a Menu only arrow: a click lists the tabs, a drag moves the Corral.
+    tab_list: bool,
 }
 
 /// One title press as a transaction (tabs-spec 3.4, 5.3): what Esc or Cancel puts back.
@@ -1517,8 +1521,11 @@ impl App {
         // Include the separated-bar gap when deciding whether a title still fits above
         // the monitor edge. The stored body and the measured strip height stay intact.
         let reserved = group_paint::strip_reserved(self.settings.label_mode, group.roll != RollState::Expanded) || group.dock_edge().is_some();
-        let separated = reserved && !self.settings.square_edges
-            && self.tab_segments_of(group, Rect::new(body.left, 0, body.right, metrics.title_h), dpi).is_some();
+        let style = crate::tabs::TabSettings::from(&self.settings).effective_style(group.style.tabs_style);
+        // A single Corral draws as a set with one tab (`render_group`), so it has the same gap.
+        let solo = group.tab.is_none() && (group_paint::TABS_SEGMENTED..=group_paint::TABS_ROUNDED).contains(&style);
+        let separated = reserved && !self.settings.square_edges && style != group_paint::TABS_FLAT
+            && (solo || self.tab_segments_of(group, Rect::new(body.left, 0, body.right, metrics.title_h), dpi).is_some());
         if separated { metrics.gap = group_paint::px(group_paint::SEGMENT_BODY_GAP, dpi); }
         // Corral policy: Preserve the press-time side throughout a captured move/
         // resize. Re-evaluate on release against the work area, using the full measured strip.

@@ -1366,7 +1366,7 @@ impl App {
             shift_tab: shift && cell.is_some(), on_tab: cell.is_some(), tab_left: tab_cell.left,
             tab_centre: tab_cell.left + tab_cell.width() / 2, strip_width: geo.title.width(),
             gated: cell.is_some() || self.is_rolled(id), started: false, page: self.pages.current,
-            portal_up: false, portal_glyph: false });
+            portal_up: false, portal_glyph: false, tab_list: false });
         self.tab_gesture = Some(gesture);
         if self.settings.rollup_require_click && self.is_rolled(id) { self.open_hot(id); }
         let grab = crate::dpi_transition::Grab {
@@ -1665,6 +1665,8 @@ impl App {
                 let (x, y) = self.to_screen((glyph.left + rect.left, glyph.top + rect.top));
                 self.portal_glyph_click(member, Rect::new(x, y, x + glyph.width(), y + glyph.height()));
             }
+        } else if press.tab_list {
+            if self.groups[index].tab_list.contains(point.0, point.1) { self.show_tab_list(press.owner); }
         } else if press.on_tab && self.tab_hit(index, point) == Some(press.member) {
             // A click on a tab: press and release on the same tab, before the drag threshold.
             self.select_tab(press.member);
@@ -1898,7 +1900,11 @@ impl App {
                 Some(LRESULT(0))
             }
             WM_LBUTTONDOWN if on_title => {
+                let on_list = self.groups[index].tab_list.contains(point.0, point.1);
+                // A locked title permits selection, and takes no press.
+                if on_list && self.layout.desktop_locked { self.show_tab_list(id); return Some(LRESULT(0)); }
                 self.begin_tab_title(index, point, wparam.0);
+                if let Some(press) = self.tab_press.as_mut().filter(|_| on_list) { press.gated = true; press.tab_list = true; }
                 Some(LRESULT(0))
             }
             WM_MOUSEMOVE if self.group_band_active(id) => {

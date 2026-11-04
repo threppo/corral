@@ -5,7 +5,7 @@ fn member(dpi: u32, gate: bool) -> SegmentInput {
 }
 
 fn segmented_items(strip: Rect, dpi: u32, count: usize) -> Vec<TabItem> {
-    let layout = tab_segments(strip, dpi, &vec![member(dpi, false); count]).unwrap();
+    let layout = tab_segments(strip, dpi, TABS_ROUNDED, &vec![member(dpi, false); count]).unwrap();
     layout.into_iter().enumerate().map(|(i, s)| TabItem {
         title: format!("Member {i}"), hit: s.hit, active: i == 0, hovered: false, own_color: None,
         custom_text: None, weight: 400 + i as u16 * 100, italic: i == 1,
@@ -20,7 +20,7 @@ fn segments_share_full_width_and_preserve_buttons_and_title_at_all_dpis() {
         for count in [2, 3, 5] {
             let strip = rect(-px(35.0, dpi), px(19.0, dpi), px(180.0 * count as f64 - 35.0, dpi) + 1, px(43.0, dpi));
             let members: Vec<_> = (0..count).map(|i| member(dpi, i % 2 != 0)).collect();
-            let segments = tab_segments(strip, dpi, &members).unwrap();
+            let segments = tab_segments(strip, dpi, TABS_ROUNDED, &members).unwrap();
             assert_eq!(segments.len(), count);
             assert_eq!(segments.first().unwrap().hit.left, strip.left);
             assert_eq!(segments.last().unwrap().hit.right, strip.right);
@@ -51,7 +51,7 @@ fn narrow_segments_drop_close_then_up_then_menu_before_the_pill_path() {
                 let m = member(dpi, gate);
                 let folder = if gate { px(GLYPH, dpi) + px(TEXT_GAP, dpi) } else { 0 };
                 let total = |seg: i32| seg * count as i32 + px(4.0, dpi) * (count as i32 - 1);
-                let at = |seg: i32| tab_segments(rect(0, 0, total(seg), metrics(dpi).title_h), dpi, &vec![m; count]);
+                let at = |seg: i32| tab_segments(rect(0, 0, total(seg), metrics(dpi).title_h), dpi, TABS_ROUNDED, &vec![m; count]);
                 let kept = |seg: i32| at(seg).unwrap().iter()
                     .map(|s| (s.layout.menu.is_some(), s.layout.up.is_some(), s.layout.close.is_some())).collect::<Vec<_>>();
                 let full = 2 * (px(CLUSTER_PAD, dpi) + px(TEXT_GAP, dpi)) + (2 + gate as i32) * px(BTN_W, dpi) + px(48.0, dpi) + folder;
@@ -70,14 +70,14 @@ fn narrow_segments_drop_close_then_up_then_menu_before_the_pill_path() {
                 let width = total(bare);
                 assert!(at(bare - 1).is_none());
                 let narrow = rect(0, 0, width - 1, metrics(dpi).title_h);
-                assert!(tab_segments(narrow, dpi, &vec![m; count]).is_none());
+                assert!(tab_segments(narrow, dpi, TABS_ROUNDED, &vec![m; count]).is_none());
                 assert!(!crate::tabs::tab_cells(narrow, (px(32.0, dpi), width - px(32.0, dpi)),
-                    &vec![px(90.0, dpi); count], 0, TABS_ROUNDED, dpi).is_empty());
+                    count, 0, TABS_ROUNDED, dpi).is_empty());
             }
         }
     }
-    assert!(tab_segments(rect(0, 0, 800, 24), 96, &[member(96, false)]).is_none());
-    assert!(tab_segments(rect(0, 0, 800, 0), 96, &[member(96, false); 2]).is_none());
+    assert!(tab_segments(rect(0, 0, 800, 24), 96, TABS_ROUNDED, &[member(96, false)]).is_none());
+    assert!(tab_segments(rect(0, 0, 800, 0), 96, TABS_ROUNDED, &[member(96, false); 2]).is_none());
 }
 
 #[test]
@@ -85,7 +85,7 @@ fn segment_hit_tests_route_every_button_and_never_hit_the_gaps() {
     for dpi in DPIS {
         for count in [2, 3, 5] {
             let strip = rect(17, 23, 17 + px(180.0 * count as f64, dpi), 23 + metrics(dpi).title_h);
-            let segments = tab_segments(strip, dpi, &vec![member(dpi, true); count]).unwrap();
+            let segments = tab_segments(strip, dpi, TABS_ROUNDED, &vec![member(dpi, true); count]).unwrap();
             for s in &segments {
                 let centre = |r: Rect| ((r.left + r.right) / 2, (r.top + r.bottom) / 2);
                 for (r, part) in [(s.layout.menu.unwrap(), SegmentPart::Menu), (s.layout.close.unwrap(), SegmentPart::Close), (s.layout.up.unwrap(), SegmentPart::Up)] {
@@ -197,4 +197,108 @@ fn segment_chrome_preserves_member_fonts_text_alpha_buttons_and_high_contrast() 
     assert!(matches!(rec.0[2], Op::Shape(_, _, c) if c == rgba(hc.window,255)));
     paint_chrome(&mut rec, &p).unwrap();
     assert!(rec.0.iter().filter_map(|o| if let Op::Text(_,_,c) = o { Some(c) } else { None }).all(|c| c.a == 255));
+}
+
+#[test]
+fn flat_and_segmented_bars_fill_the_strip_with_their_own_corners() {
+    for dpi in DPIS {
+        for style in [TABS_FLAT, TABS_SEGMENTED] {
+            let strip = rect(0, 0, px(540.0, dpi), metrics(dpi).title_h);
+            let bars = tab_segments(strip, dpi, style, &vec![member(dpi, false); 3]).unwrap();
+            assert_eq!((bars[0].hit.left, bars[2].hit.right), (strip.left, strip.right), "no space at the sides");
+            for pair in bars.windows(2) { assert_eq!(pair[1].hit.left - pair[0].hit.right, px(2.0, dpi)); }
+            assert!(bars.iter().all(|b| b.layout.menu.is_some() && b.layout.close.is_some()), "each has its own buttons");
+        }
+    }
+    let shapes = |style: u32, above: bool| {
+        let strip = if above { rect(0, 0, 540, 24) } else { rect(0, 136, 540, 160) };
+        let tabs = segmented_items(strip, 96, 3);
+        let mut p = inputs(96, "", Some(TabsPaint { style, tabs: &tabs }));
+        p.outer = rect(0, 0, 540, 160);
+        p.strip = Some(strip);
+        p.strip_above = above;
+        let mut rec = Rec::default();
+        paint_fills(&mut rec, &p).unwrap();
+        rec.0.iter().map(|o| if let Op::Shape(r, radii, _) = o { (*r, *radii) } else { panic!("{o:?}") }).collect::<Vec<_>>()
+    };
+    let seg = shapes(TABS_SEGMENTED, true);
+    assert_eq!((seg[0].0.top, seg[0].1), (26.0, [8.0; 4]), "a body of its own, 2 DIP below");
+    assert!(seg[1..].iter().all(|s| s.1 == [0.0; 4]), "square tabs: {seg:?}");
+    assert_eq!(shapes(TABS_SEGMENTED, false)[0].0.bottom, 134.0, "the same gap with the strip below");
+    assert_eq!(shapes(TABS_ROUNDED, false)[0].0.bottom, 134.0);
+    assert!(shapes(TABS_ROUNDED, true).iter().all(|s| s.1 == [8.0; 4]), "only Rounded has rounded tabs");
+    let flat = shapes(TABS_FLAT, true);
+    assert_eq!((flat[0].0.top, flat[0].1), (24.0, [0.0, 0.0, 8.0, 8.0]), "the body joins the bars");
+    assert!(flat[1..].iter().all(|s| s.1 == [0.0; 4]), "square tabs: {flat:?}");
+    let below = shapes(TABS_FLAT, false);
+    assert_eq!((below[0].0.bottom, below[0].1), (136.0, [8.0, 8.0, 0.0, 0.0]));
+}
+
+#[test]
+fn the_menu_only_arrow_follows_the_title_and_points_to_the_list() {
+    for dpi in DPIS {
+        let strip = rect(0, 0, px(300.0, dpi), metrics(dpi).title_h);
+        let room = tab_list_room(dpi);
+        let text_w = px(80.0, dpi);
+        let base = layout_title(&TitleLayoutInput { strip, dpi, want: ButtonSet { menu: true, up: false, close: true }, folder: false, text_w: text_w + room });
+        let layout = with_tab_list(base, dpi);
+        let (text, arrow) = (layout.text.unwrap(), layout.tab_list.unwrap());
+        assert_eq!(text.width(), text_w, "the title keeps its measured width");
+        assert_eq!(arrow.left - text.right, room - px(GLYPH, dpi), "a gap between them");
+        assert_eq!(arrow.right, base.text.unwrap().right);
+        let narrow = TitleLayout { text: Some(rect(0, 0, room - 1, 10)), ..Default::default() };
+        assert_eq!(with_tab_list(narrow, dpi), narrow, "no room: only the text");
+        let unnamed = TitleLayout { text: Some(rect(0, 0, room, 10)), ..Default::default() };
+        assert!(with_tab_list(unnamed, dpi).tab_list.is_some(), "an empty title still gets the arrow");
+    }
+    let strip = rect(0, 0, 300, 24);
+    let layout = with_tab_list(layout_title(&TitleLayoutInput { strip, dpi: 96, want: ButtonSet { menu: true, up: false, close: true }, folder: false, text_w: 100 }), 96);
+    for (above, want) in [(true, Glyph::Expand), (false, Glyph::Collapse)] {
+        let mut p = inputs(96, "Docs", None);
+        p.strip = Some(strip);
+        p.strip_above = above;
+        p.layout = layout;
+        assert!(record(&p).iter().any(|op| matches!(op, Op::Glyph(g, ..) if *g == want)), "{want:?}");
+    }
+}
+
+#[test]
+fn a_flat_bar_underlines_the_active_tab_and_one_outline_goes_around_the_corral() {
+    for (above, top, bottom) in [(true, 22.0, 24.0), (false, 136.0, 138.0)] {
+        let strip = if above { rect(0, 0, 540, 24) } else { rect(0, 136, 540, 160) };
+        let tabs = segmented_items(strip, 96, 2);
+        let mut p = inputs(96, "", Some(TabsPaint { style: TABS_FLAT, tabs: &tabs }));
+        p.outer = rect(0, 0, 540, 160);
+        p.strip = Some(strip);
+        p.strip_above = above;
+        p.outline = true;
+        let mut rec = Rec::default();
+        paint_chrome(&mut rec, &p).unwrap();
+        let bars: Vec<_> = rec.0.iter().filter_map(|o| if let Op::Rect(r, _) = o { Some(*r) } else { None }).collect();
+        assert_eq!(bars.len(), 1, "only the active tab");
+        assert_eq!((bars[0].top, bars[0].bottom, bars[0].left), (top, bottom, tabs[0].hit.left as f32));
+        let rings: Vec<_> = rec.0.iter().filter_map(|o| if let Op::Ring(r, ..) = o { Some(*r) } else { None }).collect();
+        assert_eq!(rings, [rectf(p.outer)]);
+    }
+}
+
+#[test]
+fn a_single_corral_draws_as_a_set_with_one_tab_in_every_style() {
+    let strip = rect(0, 0, 540, 24);
+    let layout = layout_title(&TitleLayoutInput { strip, dpi: 96, want: ButtonSet { menu: true, up: false, close: true }, folder: false, text_w: 80 });
+    let tabs = [TabItem { title: "Solo".into(), hit: strip, active: true, hovered: false, own_color: None, custom_text: None, weight: 400, italic: false,
+        segment: Some(SegmentChrome { layout, hover: 0.0, buttons: 1.0, menu: ButtonState::Rest, up: ButtonState::Disabled, close: ButtonState::Rest }) }];
+    for (style, body_top, bar_radii) in [(TABS_FLAT, 24.0, [0.0; 4]), (TABS_SEGMENTED, 26.0, [0.0; 4]), (TABS_ROUNDED, 26.0, [8.0; 4])] {
+        let mut p = inputs(96, "", Some(TabsPaint { style, tabs: &tabs }));
+        p.outer = rect(0, 0, 540, 160);
+        p.strip = Some(strip);
+        let mut rec = Rec::default();
+        paint_fills(&mut rec, &p).unwrap();
+        assert_eq!(rec.0.len(), 2, "a body and one bar: {:?}", rec.0);
+        assert!(matches!(rec.0[0], Op::Shape(body, ..) if body.top == body_top), "{:?}", rec.0);
+        assert!(matches!(rec.0[1], Op::Shape(bar, radii, _) if bar == rectf(strip) && radii == bar_radii), "{:?}", rec.0);
+        let ops = record(&p);
+        assert!(ops.iter().any(|o| matches!(o, Op::Text(t, ..) if t == "Solo")), "the title");
+        assert!(ops.iter().any(|o| matches!(o, Op::Glyph(Glyph::Menu, ..))) && ops.iter().any(|o| matches!(o, Op::Glyph(Glyph::Close, ..))), "its buttons");
+    }
 }

@@ -1,4 +1,6 @@
-//! Rounded tabs with enough room become separate, full-width Corral title bars.
+//! Tabs with enough room become full-width title bars, each with its own buttons. Rounded bars stand apart like
+//! small Corrals; Segmented bars are square boxes above the body; Flat bars are square and sit on the body with an
+//! underline. Only Rounded has rounded tabs (user decision 2026-11-04).
 use super::*;
 
 pub const SEGMENT_GAP: f64 = 4.0;
@@ -35,11 +37,11 @@ impl TabSegment {
 
 /// Equal widths, with remainder pixels distributed across the strip. A bar without room for its buttons plus 48 DIP
 /// of text drops buttons in the strip order (close, Up, menu; user decision 2026-10-30); if even the bare title does
-/// not fit, use the old pill layout instead.
-pub fn tab_segments(strip: Rect, dpi: u32, members: &[SegmentInput]) -> Option<Vec<TabSegment>> {
+/// not fit, use the narrow cells of `tab_cells` instead.
+pub fn tab_segments(strip: Rect, dpi: u32, style: u32, members: &[SegmentInput]) -> Option<Vec<TabSegment>> {
     let n = members.len();
     if n < 2 || strip.height() <= 0 { return None }
-    let gap = px(SEGMENT_GAP, dpi) as i64;
+    let gap = px(if style == TABS_ROUNDED { SEGMENT_GAP } else { TAB_GAP }, dpi) as i64;
     let usable = strip.width() as i64 - gap * (n - 1) as i64;
     if usable <= 0 { return None }
     let mut out = Vec::with_capacity(n);
@@ -70,26 +72,39 @@ pub struct SegmentChrome {
 }
 
 pub(super) fn has_segments(p: &PaintInputs) -> bool {
-    p.strip.is_some() && p.tabs.as_ref().is_some_and(|t| t.style == TABS_ROUNDED
-        && t.tabs.len() >= 2 && t.tabs.iter().all(|t| t.segment.is_some()))
+    p.strip.is_some() && p.tabs.as_ref().is_some_and(|t| (TABS_FLAT..=TABS_ROUNDED).contains(&t.style)
+        && !t.tabs.is_empty() && t.tabs.iter().all(|t| t.segment.is_some()))
 }
 
 fn segment_body(p: &PaintInputs) -> Option<Rect> {
     if p.folded { return None }
     let strip = p.strip?;
+    let gap = if p.square_edges || segment_style(p) == TABS_FLAT { 0 } else { px(SEGMENT_BODY_GAP, p.dpi) };
     let body = if p.strip_above {
-        Rect::new(p.outer.left, strip.bottom + if p.square_edges { 0 } else { px(SEGMENT_BODY_GAP, p.dpi) }, p.outer.right, p.outer.bottom)
-    } else { Rect::new(p.outer.left, p.outer.top, p.outer.right, strip.top) };
+        Rect::new(p.outer.left, strip.bottom + gap, p.outer.right, p.outer.bottom)
+    } else { Rect::new(p.outer.left, p.outer.top, p.outer.right, strip.top - gap) };
     (body.height() > 0).then_some(body)
+}
+
+fn segment_style(p: &PaintInputs) -> u32 {
+    p.tabs.as_ref().map_or(TABS_ROUNDED, |t| t.style)
+}
+
+/// Flat's body joins its bars on a square seam; the others are shapes of their own.
+fn body_radii(p: &PaintInputs) -> [f32; 4] {
+    if segment_style(p) == TABS_FLAT { strip_radii(p.radius(), !p.strip_above, false) } else { [p.radius(); 4] }
+}
+
+fn bar_radii(p: &PaintInputs) -> [f32; 4] {
+    if segment_style(p) == TABS_ROUNDED { [p.radius(); 4] } else { [0.0; 4] }
 }
 
 /// The blur mask shares exactly the fill geometry, leaving the inter-bar and body gaps transparent.
 pub fn paint_mask(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
     let color = rgba([255; 3], 255);
-    let radii = [p.radius(); 4];
-    if !has_segments(p) { return sink.fill_shape(rectf(p.outer), radii, color) }
-    if let Some(body) = segment_body(p) { sink.fill_shape(rectf(body), radii, color)?; }
-    for tab in p.tabs.as_ref().unwrap().tabs { sink.fill_shape(rectf(tab.hit), radii, color)?; }
+    if !has_segments(p) { return sink.fill_shape(rectf(p.outer), [p.radius(); 4], color) }
+    if let Some(body) = segment_body(p) { sink.fill_shape(rectf(body), body_radii(p), color)?; }
+    for tab in p.tabs.as_ref().unwrap().tabs { sink.fill_shape(rectf(tab.hit), bar_radii(p), color)?; }
     Ok(())
 }
 
@@ -128,22 +143,25 @@ fn segment_fill_at(p: &PaintInputs, tab: &TabItem, shown: f64) -> Rgba {
 }
 
 pub(super) fn paint_segment_fills(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
-    let radii = [p.radius(); 4];
     if let Some(body) = segment_body(p) {
         let color = p.high_contrast.map_or_else(|| rgba(p.body_rgb, apply_fade(p.fill_alpha, p.fade).max(1)), |h| rgba(h.window, 255));
-        sink.fill_shape(rectf(body), radii, color)?;
+        sink.fill_shape(rectf(body), body_radii(p), color)?;
     }
     for tab in p.tabs.as_ref().unwrap().tabs {
         let fill = segment_fill(p, tab);
-        if fill.a > 0 { sink.fill_shape(rectf(tab.hit), radii, fill)?; }
+        if fill.a > 0 { sink.fill_shape(rectf(tab.hit), bar_radii(p), fill)?; }
     }
     Ok(())
 }
 
 pub(super) fn paint_segment_chrome(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
+    let flat = segment_style(p) == TABS_FLAT;
     if p.outline || p.high_contrast.is_some() {
         let ink = p.high_contrast.map_or_else(|| rgba(outline_color(p.body_rgb), outline_opacity(p.fade)), |h| rgba(h.window_text, 255));
-        if let Some(body) = segment_body(p) { sink.fill_ring(rectf(body), [p.radius(); 4], outline_width(p.dpi, p.high_contrast.is_some()), ink)?; }
+        let width = outline_width(p.dpi, p.high_contrast.is_some());
+        // Flat reads as one Corral: a single outline around the bars and the body.
+        if flat { sink.fill_ring(rectf(p.outer), if p.folded { [0.0; 4] } else { body_radii(p) }, width, ink)?; }
+        else if let Some(body) = segment_body(p) { sink.fill_ring(rectf(body), [p.radius(); 4], width, ink)?; }
     }
     let shown = if p.high_contrast.is_some() { 1.0 } else { p.fade * p.reveal.clamp(0.0, 1.0) };
     if shown <= 0.0 { return Ok(()) }
@@ -170,9 +188,16 @@ pub(super) fn paint_segment_chrome(sink: &mut dyn Sink, p: &PaintInputs) -> Resu
             italic: tab.italic, layout, menu: c.menu, up: c.up, close: c.close, buttons: c.buttons,
             tabs: None, high_contrast: p.high_contrast.map(|h| HighContrast { window_text: ink, ..h }),
         };
-        if p.outline || p.high_contrast.is_some() {
+        if !flat && (p.outline || p.high_contrast.is_some()) {
             let outline = p.high_contrast.map_or_else(|| rgba(outline_color(rgb), apply_fade(180, shown)), |h| rgba(h.window_text, 255));
-            sink.fill_ring(rectf(tab.hit), [p.radius(); 4], outline_width(p.dpi, p.high_contrast.is_some()), outline)?;
+            sink.fill_ring(rectf(tab.hit), bar_radii(p), outline_width(p.dpi, p.high_contrast.is_some()), outline)?;
+        }
+        if flat && tab.active {
+            // The 2 DIP bar along the edge facing the body.
+            let bar = px(2.0, p.dpi).max(1);
+            let (top, bottom) = if p.strip_above { (tab.hit.bottom - bar, tab.hit.bottom) } else { (tab.hit.top, tab.hit.top + bar) };
+            sink.fill_rect(rectf(Rect::new(tab.hit.left, top, tab.hit.right, bottom)),
+                rgba(ink, apply_fade(255, if p.high_contrast.is_some() { 1.0 } else { shown })))?;
         }
         paint_title_chrome(sink, &child)?;
         let color = rgba(ink, apply_fade(tab_text_alpha(tab, p.high_contrast.is_some()), shown));

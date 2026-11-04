@@ -456,6 +456,7 @@ impl App {
             let show = if self.peek.is_on() { w!("Hide Corrals") } else { w!("Show Corrals") };
             let _ = AppendMenuW(menu, MF_STRING, MENU_SHOW, show);
             let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Configure Corral..."));
+            crate::app_icon::set_menu_item_icon(menu, MENU_SETTINGS as u32, windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
             let _ = AppendMenuW(menu, MF_STRING, MENU_HIDE, w!("Hide this icon"));
             let _ = SetMenuDefaultItem(menu, MENU_SHOW as u32, 0);

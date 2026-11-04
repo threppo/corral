@@ -86,6 +86,9 @@ const CMD_TAB_RIGHT: u32 = 0x3f1;
 const CMD_TAB_REMOVE: u32 = 0x3f2;
 const CMD_TAB_SEPARATE: u32 = 0x3f3;
 const CMD_TAB_SHOW: u32 = 0x400;
+/// "Tab style": `CMD_TAB_STYLE + TabsStyle` for each label (the same setting as the Settings page).
+const CMD_TAB_STYLE: u32 = 0x3f4;
+const TAB_STYLE_LABELS: [&str; 4] = ["Menu only", "Flat", "Segmented", "Rounded"];
 
 /// The commands below "Show tab" as data: (command, label, enabled). A single Corral and a stale index
 /// have none; a locked desktop disables every one of them.
@@ -420,6 +423,40 @@ impl App {
         self.settings.quick_hide_exclusions = Some(list.serialize());
     }
 
+    /// One entry per tab, the shown one checked.
+    fn append_tab_list(&self, list: HMENU, members: &[u64], active: u64) {
+        for (i, member) in members.iter().enumerate() {
+            let Some(group) = self.layout.groups.iter().find(|g| g.id == *member) else { continue };
+            let flags = if active == *member { MF_STRING | MF_CHECKED } else { MF_STRING };
+            unsafe { let _ = AppendMenuW(list, flags, BASE + CMD_TAB_SHOW as usize + i, &HSTRING::from(tab_menu_label(&self.portal_title(group)))); }
+        }
+    }
+
+    /// Menu only: the list of tabs that opens from a click on the arrow, at the strip's edge on the side of the body.
+    pub(super) fn show_tab_list(&mut self, id: u64) {
+        let Some(view) = tabs::collect(&self.layout.groups, id).filter(|v| v.members.len() > 1) else { return };
+        let Some(group) = self.layout.groups.iter().find(|g| g.id == id).cloned() else { return };
+        let Some(gw) = self.groups.iter().find(|g| g.id == id) else { return };
+        let (owner, label, rect) = (gw.hwnd, gw.tab_list, gw.rect);
+        let below = self.group_geometry(&group).below;
+        let (x, y) = self.to_screen((rect.left + label.left, rect.top + if below { label.top } else { label.bottom }));
+        let choice = unsafe {
+            let Ok(menu) = CreatePopupMenu() else { return };
+            self.append_tab_list(menu, &view.members, view.active);
+            let _ = SetForegroundWindow(owner);
+            let align = if below { TPM_BOTTOMALIGN } else { TPM_TOPALIGN };
+            let choice = match qa_portal_menu_choice() {
+                Some(answer) => answer as usize,
+                None => TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | align, x, y, 0, owner, None).0 as usize,
+            };
+            let _ = DestroyMenu(menu);
+            choice
+        };
+        if let Some(member) = choice.checked_sub(BASE + CMD_TAB_SHOW as usize).and_then(|i| view.members.get(i)).copied() {
+            self.select_tab(member);
+        }
+    }
+
     /// Append (or, with `at`, insert at that position) the Tabs submenu of a tab set (tabs-spec 6).
     /// A plain Corral has none. Returns the members in display order, for [`App::tab_menu_command`].
     pub(super) fn append_tabs_menu(&self, menu: HMENU, at: Option<u32>, id: u64) -> Vec<u64> {
@@ -428,12 +465,17 @@ impl App {
         unsafe {
             let Ok(sub) = CreatePopupMenu() else { return Vec::new() };
             if let Ok(list) = CreatePopupMenu() {
-                for (i, member) in view.members.iter().enumerate() {
-                    let Some(group) = self.layout.groups.iter().find(|g| g.id == *member) else { continue };
-                    let flags = if view.active == *member { MF_STRING | MF_CHECKED } else { MF_STRING };
-                    let _ = AppendMenuW(list, flags, BASE + CMD_TAB_SHOW as usize + i, &HSTRING::from(tab_menu_label(&self.portal_title(group))));
-                }
+                self.append_tab_list(list, &view.members, view.active);
                 let _ = AppendMenuW(sub, MF_POPUP, list.0 as usize, w!("Show tab"));
+            }
+            if let Ok(styles) = CreatePopupMenu() {
+                let first = BASE as u32 + CMD_TAB_STYLE;
+                for (i, label) in TAB_STYLE_LABELS.iter().enumerate() {
+                    let _ = AppendMenuW(styles, MF_STRING, first as usize + i, &HSTRING::from(*label));
+                }
+                let last = first + TAB_STYLE_LABELS.len() as u32 - 1;
+                let _ = CheckMenuRadioItem(styles, first, last, first + self.settings.tabs_style.min(3), MF_BYCOMMAND.0);
+                let _ = AppendMenuW(sub, MF_POPUP, styles.0 as usize, w!("Tab style"));
             }
             let commands = tab_menu_commands(index, view.members.len(), self.layout.desktop_locked);
             if !commands.is_empty() { let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PCWSTR::null()); }
@@ -453,6 +495,12 @@ impl App {
     pub(super) fn tab_menu_command(&mut self, id: u64, choice: usize, members: &[u64]) -> bool {
         let Some(view) = tabs::collect(&self.layout.groups, id) else { return false };
         if view.members != members { return false }
+        if let Some(style) = choice.checked_sub(BASE + CMD_TAB_STYLE as usize).filter(|s| *s < TAB_STYLE_LABELS.len()) {
+            self.settings.tabs_style = style as u32;
+            self.persist_settings();
+            self.refresh_all();
+            return true;
+        }
         if self.profile_pending.is_some() && choice.checked_sub(BASE + CMD_TAB_SHOW as usize).is_none() {
             return choice.checked_sub(BASE).is_some_and(|c| matches!(c as u32, CMD_TAB_LEFT | CMD_TAB_RIGHT | CMD_TAB_REMOVE | CMD_TAB_SEPARATE));
         }
@@ -630,6 +678,7 @@ impl App {
             }
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, CONFIGURE_ID, w!("Configure Corral..."));
+            crate::app_icon::set_menu_item_icon(menu, CONFIGURE_ID as u32, self.group_dpi(id));
             let _ = SetForegroundWindow(owner);
             // QA hook: the CORRAL_QA_PORTAL_MENU queue answers this menu too (hex ids)
             let choice = match qa_portal_menu_choice() {
@@ -1267,6 +1316,10 @@ mod tab_menu_tests {
 
     #[test]
     fn a_single_corral_or_a_stale_index_has_no_tab_commands() {
+        for (style, label) in [(crate::group_paint::TABS_MENU_ONLY, "Menu only"), (crate::group_paint::TABS_FLAT, "Flat"), (crate::group_paint::TABS_SEGMENTED, "Segmented"), (crate::group_paint::TABS_ROUNDED, "Rounded")] {
+            assert_eq!(TAB_STYLE_LABELS[style as usize], label);
+        }
+        assert!(CMD_TAB_STYLE + TAB_STYLE_LABELS.len() as u32 <= CMD_TAB_SHOW, "style ids stop short of the tab list");
         assert!(tab_menu_commands(0, 1, false).is_empty());
         assert!(tab_menu_commands(3, 3, false).is_empty());
         assert!(tab_menu_commands(0, 0, false).is_empty());

@@ -479,6 +479,7 @@ impl App {
             let _ = InsertMenuW(hmenu, 3, MF_BYPOSITION | MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(hmenu, MF_STRING, MENU_CONFIGURE as usize, w!("Configure Corral"));
+            crate::app_icon::set_menu_item_icon(hmenu, MENU_CONFIGURE as u32, windows::Win32::UI::HiDpi::GetDpiForWindow(owner));
             let _ = AppendMenuW(hmenu, MF_STRING, MENU_EXIT as usize, w!("Exit Corral"));
         }
         let screen = self.to_screen(client_point);

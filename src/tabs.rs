@@ -799,72 +799,33 @@ pub struct TabCell {
     pub label: Rect,
 }
 
-/// Tab widths (corral-painting-spec 7): text plus 2 x 10 DIP, clamped to 48..160 DIP.
+/// Tab cells (corral-painting-spec 7): equal widths across the title span, 48 DIP at the least.
 pub const TAB_MIN_DIP: f64 = 48.0;
-pub const TAB_MAX_DIP: f64 = 160.0;
 pub const TAB_PAD_DIP: f64 = 10.0;
 
-/// Natural width of a tab whose title measures `text_w` px.
-pub fn tab_width(text_w: i32, dpi: u32) -> i32 {
-    (text_w.max(0) + 2 * px(TAB_PAD_DIP, dpi)).clamp(px(TAB_MIN_DIP, dpi), px(TAB_MAX_DIP, dpi))
-}
-
-/// Widths that fit `avail`: the natural ones, else all shrunk by the same amount down to `min`.
-/// `None` when even all-minimum tabs do not fit (the strip then scrolls).
-fn shrink_equally(natural: &[i32], avail: i32, min: i32) -> Option<Vec<i32>> {
-    let total: i64 = natural.iter().map(|w| *w as i64).sum();
-    if total <= avail as i64 {
-        return Some(natural.to_vec());
-    }
-    let sum_at = |d: i32| -> i64 { natural.iter().map(|w| (*w - d).max(min) as i64).sum() };
-    let widest = natural.iter().copied().max().unwrap_or(0);
-    if sum_at(widest) > avail as i64 {
-        return None;
-    }
-    let (mut lo, mut hi) = (0, widest);
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if sum_at(mid) <= avail as i64 { hi = mid } else { lo = mid + 1 }
-    }
-    Some(natural.iter().map(|w| (*w - lo).max(min)).collect())
-}
-
-/// The visible tabs of a strip. `span` is the x range between the button clusters (`layout_title`),
-/// `text_widths` the measured title of every member, `active` the selected member's index. When the
-/// tabs exceed the span they shrink equally down to 48 DIP, then the strip scrolls by whole tabs so the
-/// active tab is fully visible; hidden tabs have no cell (the Corral menu lists all). Menu only (0), a
-/// single tab or a span narrower than one tab gives no cells.
-pub fn tab_cells(strip: Rect, span: (i32, i32), text_widths: &[i32], active: usize, style: u32, dpi: u32) -> Vec<TabCell> {
-    let count = text_widths.len();
+/// The visible tabs of a strip. `span` is the x range between the button clusters (`layout_title`), `count` the
+/// number of members, `active` the selected member's index. The tabs share the span equally; when they would be
+/// narrower than 48 DIP the strip scrolls by whole tabs so the active tab is fully visible; hidden tabs have no cell
+/// (the Corral menu lists all). Menu only (0), a single tab or a span narrower than one tab gives no cells.
+pub fn tab_cells(strip: Rect, span: (i32, i32), count: usize, active: usize, style: u32, dpi: u32) -> Vec<TabCell> {
     let avail = span.1 as i64 - span.0 as i64;
-    let min = px(TAB_MIN_DIP, dpi);
-    if count < 2 || !(1..=3).contains(&style) || empty(strip) || avail < min as i64 {
+    let min = px(TAB_MIN_DIP, dpi).max(1) as i64;
+    if count < 2 || !(1..=3).contains(&style) || empty(strip) || avail < min {
         return Vec::new();
     }
-    let avail = avail.min(i32::MAX as i64) as i32;
-    let natural: Vec<i32> = text_widths.iter().map(|w| tab_width(*w, dpi)).collect();
-    let (widths, first) = match shrink_equally(&natural, avail, min) {
-        Some(widths) => (widths, 0),
-        None => {
-            // All tabs at the minimum: start at the earliest tab that still shows the active one whole.
-            let active = active.min(count - 1);
-            let fits = avail / min.max(1);
-            let first = (active as i32 + 1 - fits).max(0) as usize;
-            (vec![min; count], first)
-        }
-    };
+    let all_fit = count as i64 * min <= avail;
+    // Scrolling: start at the earliest tab that still shows the active one whole.
+    let first = if all_fit { 0 } else { (active.min(count - 1) as i64 + 1 - avail / min).max(0) as usize };
+    let edge = |i: usize| span.0 as i64 + if all_fit { avail * i as i64 / count as i64 } else { (i - first) as i64 * min };
     let pad = px(TAB_PAD_DIP, dpi);
-    let mut x = span.0 as i64;
     let mut cells = Vec::new();
-    for (i, width) in widths.iter().enumerate().skip(first) {
-        let right = x + *width as i64;
-        if right > span.1 as i64 {
+    for i in first..count {
+        if edge(i + 1) > span.1 as i64 {
             break;
         }
-        let hit = Rect::new(sat(x), strip.top, sat(right), strip.bottom);
+        let hit = Rect::new(sat(edge(i)), strip.top, sat(edge(i + 1)), strip.bottom);
         let inset = pad.min(hit.width() / 2);
         cells.push(TabCell { index: i as u32, hit, label: Rect::new(hit.left + inset, strip.top, hit.right - inset, strip.bottom) });
-        x = right;
     }
     cells
 }
@@ -1038,7 +999,7 @@ mod tests {
 
     fn info(id: u64, dpi: u32, origin: (i32, i32), left: i32, widths: &[i32], active: usize, refusal: Option<Refusal>) -> StripInfo {
         let s = strip(dpi, origin, left);
-        let cells = tab_cells(s, (s.left + 4, s.right - 4), widths, active, 3, dpi);
+        let cells = tab_cells(s, (s.left + 4, s.right - 4), widths.len(), active, 3, dpi);
         StripInfo { id, strip: s, cells, tabs: widths.len().max(1), refusal }
     }
 
@@ -1109,13 +1070,13 @@ mod tests {
     #[test]
     fn the_insertion_mark_sits_on_the_tab_edge_or_the_strip_end() {
         let s = strip(96, (0, 0), 0);
-        let cells = tab_cells(s, (s.left + 4, s.right - 4), &[40, 40, 40], 0, 3, 96);
+        let cells = tab_cells(s, (s.left + 4, s.right - 4), 3, 0, 3, 96);
         assert_eq!(insertion_mark(&cells, 0, 3), Some(cells[0].hit.left));
         assert_eq!(insertion_mark(&cells, 2, 3), Some(cells[2].hit.left));
         assert_eq!(insertion_mark(&cells, 3, 3), Some(cells[2].hit.right), "append");
         assert_eq!(insertion_mark(&[], 3, 3), None);
         // a scrolled strip that hides the place shows no mark
-        let crowded = tab_cells(strip(96, (0, 0), 0), (0, 100), &[200; 6], 5, 3, 96);
+        let crowded = tab_cells(strip(96, (0, 0), 0), (0, 100), 6, 5, 3, 96);
         assert!(crowded.first().unwrap().index > 0);
         assert_eq!(insertion_mark(&crowded, 0, 6), None);
     }
@@ -1631,44 +1592,24 @@ mod strip_tests {
     }
 
     #[test]
-    fn tab_widths_are_text_plus_padding_clamped_to_48_160_dip() {
+    fn tabs_that_fit_share_the_whole_span_equally() {
         for dpi in [96, 120, 144, 192, 240] {
-            assert_eq!(tab_width(0, dpi), r(48.0, dpi), "short titles take the minimum");
-            assert_eq!(tab_width(r(60.0, dpi), dpi), r(60.0, dpi) + 2 * r(10.0, dpi));
-            assert_eq!(tab_width(r(500.0, dpi), dpi), r(160.0, dpi), "long titles take the maximum");
+            for (span, count) in [((30, 530), 3), ((-20, 481), 2), ((0, 1000), 7)] {
+                let cells = tab_cells(strip_at(dpi), span, count, 0, 2, dpi);
+                assert_eq!(cells.len(), count);
+                assert_eq!((cells[0].hit.left, cells[count - 1].hit.right), span, "the tabs fill the span");
+                let widths: Vec<_> = cells.iter().map(|c| c.hit.width()).collect();
+                assert!(widths.iter().max().unwrap() - widths.iter().min().unwrap() <= 1, "{widths:?}");
+                for pair in cells.windows(2) {
+                    assert_eq!(pair[0].hit.right, pair[1].hit.left, "no gaps or overlaps");
+                }
+                for cell in &cells {
+                    assert!(cell.label.left >= cell.hit.left && cell.label.right <= cell.hit.right);
+                }
+                assert_eq!(hit_tab(&cells, (span.0 + 1, cells[0].hit.top + 1)), Some(0));
+                assert_eq!(hit_tab(&cells, (span.1, cells[0].hit.top + 1)), None);
+            }
         }
-    }
-
-    #[test]
-    fn tabs_that_fit_keep_their_natural_widths_side_by_side() {
-        let dpi = 96;
-        let cells = tab_cells(strip_at(dpi), (30, 530), &[40, 100, 20], 0, 2, dpi);
-        assert_eq!(cells.iter().map(|c| c.hit.width()).collect::<Vec<_>>(), [60, 120, 48]);
-        assert_eq!(cells[0].hit.left, 30);
-        for pair in cells.windows(2) {
-            assert_eq!(pair[0].hit.right, pair[1].hit.left, "no gaps or overlaps");
-        }
-        for cell in &cells {
-            assert!(cell.label.left >= cell.hit.left && cell.label.right <= cell.hit.right);
-        }
-        assert_eq!(hit_tab(&cells, (31, 20)), Some(0));
-        assert_eq!(hit_tab(&cells, (cells[2].hit.right, 20)), None);
-    }
-
-    #[test]
-    fn crowded_tabs_shrink_equally_down_to_the_minimum() {
-        let dpi = 96;
-        // natural 160 + 160 + 160 = 480 in a 400 px span: each loses the same amount
-        let cells = tab_cells(strip_at(dpi), (0, 400), &[300, 300, 300], 1, 1, dpi);
-        let widths: Vec<_> = cells.iter().map(|c| c.hit.width()).collect();
-        assert_eq!(widths.len(), 3);
-        assert!(widths.iter().all(|w| *w >= 48) && widths.iter().sum::<i32>() <= 400);
-        assert!(widths.iter().sum::<i32>() >= 398, "{widths:?}");
-        assert!(widths.iter().max().unwrap() - widths.iter().min().unwrap() <= 1);
-        // a short tab keeps its width while the long ones give way
-        let cells = tab_cells(strip_at(dpi), (0, 300), &[0, 300, 300], 0, 1, dpi);
-        assert_eq!(cells[0].hit.width(), 48);
-        assert!(cells[1].hit.width() >= 48 && cells[1].hit.width() < 160);
     }
 
     #[test]
@@ -1678,7 +1619,7 @@ mod strip_tests {
             let span = (r(20.0, dpi), r(20.0, dpi) + 4 * min + min / 2);
             for count in 5..=12usize {
                 for active in 0..count {
-                    let cells = tab_cells(strip_at(dpi), span, &vec![r(200.0, dpi); count], active, 3, dpi);
+                    let cells = tab_cells(strip_at(dpi), span, count, active, 3, dpi);
                     assert!(!cells.is_empty());
                     let shown: Vec<u32> = cells.iter().map(|c| c.index).collect();
                     assert!(shown.contains(&(active as u32)), "active {active} of {count} visible: {shown:?}");
@@ -1695,11 +1636,11 @@ mod strip_tests {
     #[test]
     fn no_cells_for_menu_only_one_tab_or_a_span_narrower_than_a_tab() {
         let dpi = 96;
-        assert!(tab_cells(strip_at(dpi), (0, 400), &[10, 10], 0, 0, dpi).is_empty(), "Menu only");
-        assert!(tab_cells(strip_at(dpi), (0, 400), &[10, 10], 0, 4, dpi).is_empty(), "unknown style");
-        assert!(tab_cells(strip_at(dpi), (0, 400), &[10], 0, 1, dpi).is_empty(), "one tab");
-        assert!(tab_cells(strip_at(dpi), (0, 47), &[10, 10], 0, 1, dpi).is_empty(), "narrower than 48 DIP");
-        assert!(tab_cells(Rect::default(), (0, 400), &[10, 10], 0, 1, dpi).is_empty());
+        assert!(tab_cells(strip_at(dpi), (0, 400), 2, 0, 0, dpi).is_empty(), "Menu only");
+        assert!(tab_cells(strip_at(dpi), (0, 400), 2, 0, 4, dpi).is_empty(), "unknown style");
+        assert!(tab_cells(strip_at(dpi), (0, 400), 1, 0, 1, dpi).is_empty(), "one tab");
+        assert!(tab_cells(strip_at(dpi), (0, 47), 2, 0, 1, dpi).is_empty(), "narrower than 48 DIP");
+        assert!(tab_cells(Rect::default(), (0, 400), 2, 0, 1, dpi).is_empty());
     }
 
     #[test]
@@ -1707,7 +1648,7 @@ mod strip_tests {
         for dpi in [96, 120, 144, 192, 240] {
             for style in [1, 2, 3] {
                 for span_w in [100, 200, 333, 700] {
-                    let cells = tab_cells(strip_at(dpi), (-20, -20 + span_w), &[10, 80, 30, 120], 2, style, dpi);
+                    let cells = tab_cells(strip_at(dpi), (-20, -20 + span_w), 4, 2, style, dpi);
                     if cells.is_empty() {
                         continue;
                     }

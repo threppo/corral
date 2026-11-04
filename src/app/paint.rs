@@ -94,8 +94,8 @@ impl App {
         })
     }
 
-    /// The visible tab cells of `group`'s tab set in `strip` (window coordinates): tab widths follow the
-    /// measured titles (spec 7). Empty for a single Corral, Menu only, or a strip too narrow for a tab.
+    /// The visible tab cells of `group`'s tab set in `strip` (window coordinates): equal widths across the
+    /// title span (spec 7). Empty for a single Corral, Menu only, or a strip too narrow for a tab.
     pub(super) fn tab_cells_of(&self, group: &model::Group, strip: Rect, dpi: u32) -> Vec<tabs::TabCell> {
         let members = tabs::members(&self.layout.groups, group);
         if members.len() < 2 { return Vec::new() }
@@ -105,25 +105,25 @@ impl App {
                 label: Rect::new(s.layout.span.0 + if s.layout.folder.is_some() { group_paint::px(group_paint::GLYPH + group_paint::TEXT_GAP, dpi) } else { 0 },
                     strip.top, s.layout.span.1, strip.bottom) }).collect();
         }
-        let metrics = self.title_metrics_of(group, dpi);
         let shown = members.iter().position(|m| m.id == group.id).unwrap_or(0);
         // While a tab is dragged near an end of a crowded strip, the strip follows the drag (tabs-spec 5.2).
         let active = self.tab_gesture.as_ref().filter(|_| self.tab_press.is_some_and(|p| p.owner == group.id))
             .and_then(|g| g.scroll_anchor).unwrap_or(shown);
         let span = self.title_layout_for(group, strip, dpi, 0, false).span;
-        tabs::tab_cells(strip, span, &metrics.widths, active, style, dpi)
+        tabs::tab_cells(strip, span, members.len(), active, style, dpi)
     }
 
     /// Shared by painting, tab selection/reorder/drop targets and strip placement.
     pub(super) fn tab_segments_of(&self, group: &model::Group, strip: Rect, dpi: u32) -> Option<Vec<group_paint::TabSegment>> {
-        if tabs::TabSettings::from(&self.settings).effective_style(group.style.tabs_style) != group_paint::TABS_ROUNDED { return None }
+        let style = tabs::TabSettings::from(&self.settings).effective_style(group.style.tabs_style);
+        if !(group_paint::TABS_FLAT..=group_paint::TABS_ROUNDED).contains(&style) { return None }
         let members = tabs::members(&self.layout.groups, group);
         if members.len() < 2 { return None }
         let metrics = self.title_metrics_of(group, dpi);
         let inputs: Vec<_> = members.iter().enumerate().map(|(i, m)| group_paint::SegmentInput {
             want: self.title_buttons_of(m), folder: self.portals.contains_key(&m.id), text_w: metrics.widths.get(i).copied().unwrap_or(0),
         }).collect();
-        group_paint::tab_segments(strip, dpi, &inputs)
+        group_paint::tab_segments(strip, dpi, style, &inputs)
     }
 
     /// Visual state of a title button of the window at `index` (spec 6): Disabled when it cannot act,
@@ -295,7 +295,7 @@ impl App {
                 }
             }
             super::pages_glue::register_touch(hwnd);
-            self.groups.push(GroupWindow { id: group.id, hwnd, surface, rect, title: Rect::default(), body: Rect::default(), glyph: Rect::default(), menu_glyph: Rect::default(), close_glyph: Rect::default(), up_glyph: Rect::default(), tab_hover: None, strip_hot: false, hot_button: None,
+            self.groups.push(GroupWindow { id: group.id, hwnd, surface, rect, title: Rect::default(), body: Rect::default(), glyph: Rect::default(), menu_glyph: Rect::default(), close_glyph: Rect::default(), up_glyph: Rect::default(), tab_list: Rect::default(), tab_hover: None, strip_hot: false, hot_button: None,
                 segments: Vec::new(), segment_hot: None, segment_press: None, segment_hover: Default::default() });
             if tabs::body_visible(&self.layout.groups, &group) {
                 self.ensure_drop_target(hwnd, DropSite::Group(group.id));
@@ -694,12 +694,19 @@ impl App {
         let up_enabled = is_portal && self.portals.get(&group.id)
             .is_some_and(|view| view.core.try_borrow().is_ok_and(|core| core.nav.can_up()));
         let text_w = if tabbed || !draw_title { 0 } else { title_metrics.widths.get(me).copied().unwrap_or(0) };
+        // Menu only: an arrow after the title says it lists the tabs.
+        let tab_list = draw_title && tab_style == group_paint::TABS_MENU_ONLY && tab_members.len() > 1;
+        let text_w = if tab_list { text_w + group_paint::tab_list_room(geo.dpi) } else { text_w };
         let layout = if draw_title && segments.is_none() { self.title_layout_for(&group, title, geo.dpi, text_w, !tabbed) } else { group_paint::TitleLayout::default() };
+        let layout = if tab_list { group_paint::with_tab_list(layout, geo.dpi) } else { layout };
         let (menu_state, up_state, close_state) = (
             self.title_button_state(index, TitleButton::Menu, true),
             self.title_button_state(index, TitleButton::Up, up_enabled),
             self.title_button_state(index, TitleButton::Close, true),
         );
+        // A single Corral is drawn as a set with one tab, so the title looks the same in both (user decision 2026-11-04).
+        // Only the drawing: its hit rectangles stay those of a plain title, it has no tab to reorder or tear off.
+        let solo = draw_title && tab_members.len() < 2 && (group_paint::TABS_FLAT..=group_paint::TABS_ROUNDED).contains(&tab_style);
         let colors_on = self.settings.tabs_always_show_colors || self.settings.tabs_colored_per_tab_in_segment_view;
         let tab_items: Vec<group_paint::TabItem> = tab_cells.iter().map(|cell| {
             let member = tab_members[cell.index as usize];
@@ -728,6 +735,13 @@ impl App {
                 }),
             }
         }).collect();
+        let tab_items = if solo {
+            let own = colors_on.then(|| group_paint::colorref_rgb(base_color));
+            vec![group_paint::TabItem { title: title_text.clone(), hit: title, active: true, hovered: false, own_color: own,
+                custom_text: (!look.text_auto).then(|| group_paint::colorref_rgb(fx.text)), weight, italic,
+                segment: Some(group_paint::SegmentChrome { layout, hover: if self.groups[index].strip_hot { hover } else { 0.0 }, buttons: hover,
+                    menu: menu_state, up: up_state, close: close_state }) }]
+        } else { tab_items };
         let high_contrast = group_paint::high_contrast();
         let paint = group_paint::PaintInputs {
             outer: Rect::new(0, 0, w, h),
@@ -753,7 +767,7 @@ impl App {
             up: up_state,
             close: close_state,
             buttons: hover,
-            tabs: tabbed.then(|| group_paint::TabsPaint { style: tab_style, tabs: &tab_items }),
+            tabs: (tabbed || solo).then(|| group_paint::TabsPaint { style: tab_style, tabs: &tab_items }),
             high_contrast,
         };
 
@@ -776,7 +790,7 @@ impl App {
         let close_rect = layout.close.filter(|_| shown);
         // Up takes the pointer whenever the strip is shown (it is not a hover control).
         let up_rect = layout.up.filter(|_| draw_title && up_enabled && reveal > 0.0);
-        let segment_hits: Vec<_> = tab_items.iter().enumerate().filter_map(|(i, tab)| {
+        let segment_hits: Vec<_> = tab_items.iter().enumerate().filter(|_| !solo).filter_map(|(i, tab)| {
             let chrome = tab.segment?;
             Some(SegmentHit { member: tab_members[i].id, segment: group_paint::TabSegment { hit: tab.hit, layout: chrome.layout },
                 buttons: (chrome.buttons > 0.0 && fade > 0 && reveal > 0.0) || high_contrast.is_some(),
@@ -923,6 +937,10 @@ impl App {
         gw.menu_glyph = menu_rect.unwrap_or_default();
         gw.close_glyph = close_rect.unwrap_or_default();
         gw.up_glyph = up_rect.unwrap_or_default();
+        // Only the arrow, with a little room around it: a double-click on the title still folds.
+        let pad = group_paint::px(group_paint::TEXT_GAP, geo.dpi);
+        gw.tab_list = layout.tab_list.filter(|_| reveal > 0.0)
+            .map_or_else(Rect::default, |arrow| Rect::new(arrow.left - pad, title.top, arrow.right + pad, title.bottom));
         gw.segments = segment_hits;
         if gw.segments.is_empty() {
             gw.segment_hot = None;

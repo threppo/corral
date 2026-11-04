@@ -15,8 +15,10 @@ Corral keeps the desktop tidy with a set of building blocks you arrange yourself
 - **Folder Gates**: a corral that shows a folder and lets you browse it without opening a window.
 - **Views**: every Corral and Gate shows its items as Icons, List or Details (sortable, resizable
   columns: Name, Size, Type, Date modified).
-- **Tabs**: stack several Corrals and Gates in one place and switch between them; with the Rounded
-  style each tab gets its own rounded title bar with its own menu, close and Up buttons.
+- **Tabs**: stack several Corrals and Gates in one place and switch between them. Flat, Segmented
+  and Rounded give each tab its own full-width title bar with its own menu, close and Up buttons;
+  Menu only lists the tabs from an arrow on the title. Single Corrals follow the same style, so
+  they match. Pick a style in Settings or from a tab set's menu under Tabs > Tab style.
 - **Camouflage**: icons take on the colours of the wallpaper behind them, for a quieter desktop.
 - **Round-up**: rules that send new desktop items to the right corral, with a preview before sorting.
 - **Saved desk setups**: corral placements remembered per monitor setup and restored when it returns.

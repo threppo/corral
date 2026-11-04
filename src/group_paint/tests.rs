@@ -571,18 +571,20 @@ fn every_tab_style_makes_its_documented_primitives() {
     };
     assert!(fills(TABS_MENU_ONLY).is_empty(), "Menu only has no strip");
     let flat = fills(TABS_FLAT);
-    assert!(matches!(flat.as_slice(), [Op::Rect(bar, _)] if bar.bottom == 24.0 && bar.top == 22.0 && bar.left == 0.0 && bar.right == 80.0),
+    assert_eq!(flat.len(), 3, "active cell, its bar, inactive cell: {flat:?}");
+    assert!(matches!(flat[0], Op::Rect(r, c) if r.left == 1.0 && r.right == 79.0 && r.top == 2.0 && r.bottom == 22.0 && c.a == pct_alpha(14)), "active cell {flat:?}");
+    assert!(matches!(flat[1], Op::Rect(bar, _) if bar.bottom == 24.0 && bar.top == 22.0 && bar.left == 1.0 && bar.right == 79.0),
         "an active 2 DIP bar on the edge facing the body: {flat:?}");
-    let seg = fills(TABS_SEGMENTED);
-    assert!(matches!(seg[0], Op::Round(r, rad, c) if rad == 6.0 && r.left == 2.0 && c.a == pct_alpha(10)), "track {seg:?}");
-    assert!(matches!(seg[1], Op::Round(_, rad, c) if rad == 4.0 && c.a == pct_alpha(22)), "active segment");
-    assert_eq!(seg.len(), 2, "inactive, not hovered: no fill");
-    let round = fills(TABS_ROUNDED);
-    assert_eq!(round.len(), 2);
-    assert!(matches!(round[0], Op::Round(r, rad, c) if c.a == pct_alpha(22) && r.bottom - r.top == 16.0 && rad == 8.0), "active pill {round:?}");
-    assert!(matches!(round[1], Op::Round(_, _, c) if c.a == pct_alpha(8)), "inactive pill");
-    let gap = if let (Op::Round(a, ..), Op::Round(b, ..)) = (&round[0], &round[1]) { b.left - a.right } else { 0.0 };
-    assert_eq!(gap, 4.0, "pills 4 DIP apart");
+    assert!(matches!(flat[2], Op::Rect(_, c) if c.a == pct_alpha(6)), "inactive cell {flat:?}");
+    for (style, want) in [(TABS_SEGMENTED, 0.0), (TABS_ROUNDED, 6.0)] {
+        let cells = fills(style);
+        assert_eq!(cells.len(), 4, "a fill and an edge per tab, no track: {cells:?}");
+        assert!(matches!(cells[0], Op::Round(r, rad, c) if c.a == pct_alpha(22) && r.top == 2.0 && r.bottom == 22.0 && rad == want), "active cell {cells:?}");
+        assert!(matches!(cells[1], Op::Ring(_, _, w, c) if w == 1.0 && c.a == pct_alpha(TAB_EDGE_PCT)), "edge {cells:?}");
+        assert!(matches!(cells[2], Op::Round(_, _, c) if c.a == pct_alpha(8)), "inactive cell {cells:?}");
+        let gap = if let (Op::Round(a, ..), Op::Round(b, ..)) = (&cells[0], &cells[2]) { b.left - a.right } else { 0.0 };
+        assert_eq!(gap, 2.0, "cells 2 DIP apart");
+    }
 }
 
 #[test]
@@ -593,7 +595,7 @@ fn flat_bar_faces_the_body_on_either_side() {
     p.strip_above = false;
     let mut rec = Rec::default();
     paint_fills(&mut rec, &p).unwrap();
-    assert!(matches!(rec.0[1], Op::Rect(bar, _) if bar.top == 0.0 && bar.bottom == 2.0), "{:?}", rec.0);
+    assert!(matches!(rec.0[2], Op::Rect(bar, _) if bar.top == 0.0 && bar.bottom == 2.0), "{:?}", rec.0);
 }
 
 #[test]
