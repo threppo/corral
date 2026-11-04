@@ -643,6 +643,9 @@ impl App {
     }
 
     fn peek_refusal(&self) -> Option<String> {
+        if self.settings.disabled {
+            return Some("Corral is off".into());
+        }
         entry_refusal(
             self.detached(),
             self.ole_drag.is_some() || OLE_DRAG_RUNNING.with(|c| c.get()),

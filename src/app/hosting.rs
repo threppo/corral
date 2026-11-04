@@ -86,7 +86,7 @@ impl App {
     /// (no `SetWindowPos`, so no needless recomposition and no reorder events), which makes repeated
     /// restacks after a show-desktop press free (`showdesk.rs`).
     pub(super) fn restack_for(&mut self, cause: &str) -> Restack {
-        if !self.detached() {
+        if !self.detached() || self.settings.disabled {
             return Restack::Skipped;
         }
         if self.peek.is_on() {
@@ -176,7 +176,9 @@ impl App {
             return false;
         };
         self.surface_hwnd = surface_hwnd;
-        desktop::hide_listview(&host);
+        if !self.settings.disabled {
+            desktop::hide_listview(&host);
+        }
         self.restack();
         self.profile_displays_changed();
         self.load_items();

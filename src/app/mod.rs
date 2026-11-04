@@ -3,6 +3,7 @@
 //! group rectangles in DIPs relative to the monitor work area (see model.rs).
 
 mod creation_glue;
+mod corral_off;
 mod covered_icons;
 mod group_menu;
 mod hosting;
@@ -1144,6 +1145,9 @@ pub fn run(opts: Options) -> i32 {
     0
 }
 
+/// At login Corral can start before Explorer has made its desktop: how long to wait for it before giving up.
+const HOST_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
 impl App {
     fn create(opts: Options, instance: HINSTANCE) -> Result<App, String> {
         let (parent, preview_host, host) = match opts.mode {
@@ -1162,7 +1166,7 @@ impl App {
                 (hwnd, Some(hwnd), None)
             }
             Mode::Desktop => {
-                let host = desktop::find_host().ok_or("Explorer desktop host not found")?;
+                let host = desktop::wait_for_host(HOST_WAIT).ok_or("Explorer desktop host not found")?;
                 (host.progman, None, Some(host))
             }
         };
@@ -1185,7 +1189,9 @@ impl App {
                     was_visible: h.listview_was_visible,
                 };
                 let child = watchdog::spawn(&args).map_err(|e| format!("watchdog: {e}"))?;
-                desktop::hide_listview(h);
+                if !crate::settings::load_with_backup(&opts.settings_path).disabled {
+                    desktop::hide_listview(h);
+                }
                 Some(child)
             }
             None => None,
@@ -1310,6 +1316,7 @@ impl App {
         app.prepare_round_up();
         app.profile_startup(true);
         app.load_items();
+        app.return_rescued_groups();
         app.rebuild_runtime_bodies();
         app.clamp_profile_titles();
         app.acknowledge_desk_display();
@@ -1825,7 +1832,7 @@ impl App {
                 if let Some(host) = self.host {
                     if !desktop::is_same_listview(host.listview, host.explorer_pid) {
                         self.schedule_reattach();
-                    } else if unsafe { IsWindowVisible(host.listview) }.as_bool() {
+                    } else if !self.settings.disabled && unsafe { IsWindowVisible(host.listview) }.as_bool() {
                         desktop::hide_listview(&host);
                     }
                 }
@@ -1854,6 +1861,7 @@ impl App {
                 Some(LRESULT(0))
             }
             WM_TIMER if wparam.0 == TIMER_SETTINGS => {
+                self.profile_poll_displays();
                 self.sync_desktop_active();
                 self.color_overlay_housekeeping();
                 if self.settings_file_stamp() != self.settings_stamp {
@@ -1983,6 +1991,7 @@ impl App {
     fn reload_settings(&mut self) {
         let title_edge_was = self.settings.title_edge_auto_adjust;
         let desk_was=self.settings.get(crate::settings::Field::LayoutPreserve);
+        let off_was = self.settings.disabled;
         self.settings = settings_store::load_with_backup(&self.opts.settings_path);
         self.desk_mode_reloaded(desk_was==2);
         self.consume_desk_request();
@@ -1994,6 +2003,7 @@ impl App {
         self.refresh_icon_metrics();
         self.peek_configure();
         self.taskbar_configure();
+        self.corral_off_changed(off_was);
         // colour-state-spec 6: a settings reload cancels the draft. The freshly loaded settings hold
         // the stored look already; the Corral part of the draft is taken off the layout.
         self.color_overlay.cancel_for_reload(&mut self.layout);
@@ -2035,6 +2045,10 @@ impl App {
     }
 
     fn open_settings_window(&self) {
+        // One settings window per layout: several would each save their whole snapshot over the others.
+        if crate::settings::style_request::send_raise(&self.opts.layout_path) == crate::settings::style_request::LiveOutcome::Applied {
+            return;
+        }
         if let Ok(exe) = std::env::current_exe() {
             // the Rules page lists this app's Corrals as destinations
             let _ = std::process::Command::new(exe)

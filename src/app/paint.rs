@@ -446,6 +446,10 @@ impl App {
     pub(super) fn loose_fx(&self) -> Option<CellFx> { None }
 
     pub(super) fn render_surface(&mut self) {
+        if self.settings.disabled {
+            unsafe { let _ = ShowWindow(self.surface_hwnd, SW_HIDE); }
+            return;
+        }
         if self.pages.moving() && !self.pages.snapshotting { return; }
         let covered = self.covered_loose_set();
         if !self.pages.snapshotting && !covered.is_empty() {
@@ -624,7 +628,7 @@ impl App {
             log(&format!("color editor: render group={}", self.groups[index].id));
         }
         let Some(group) = self.layout.groups.iter().find(|g| g.id == self.groups[index].id).cloned() else { return };
-        if !tabs::body_visible(&self.layout.groups, &group) || !self.page_group_visible(&group) {
+        if self.settings.disabled || !tabs::body_visible(&self.layout.groups, &group) || !self.page_group_visible(&group) {
             if !tabs::body_visible(&self.layout.groups, &group) {
                 // Discard old visible pixels too: page animation composites stored surfaces.
                 let _ = self.groups[index].surface.draw(|ctx| { ctx.clear(Rgba::TRANSPARENT); Ok(()) });

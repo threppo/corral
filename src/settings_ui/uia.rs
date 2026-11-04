@@ -502,12 +502,8 @@ fn measure_page(
         for row in &sec.rows {
             let id = row_id(view.page, &row.row);
             let full = RectF::new(row.x, row.y, row.x + row.w, row.y + row.h);
-            let row_name =
-                if row.row.kind == RowKind::Status && !settings.is_on(Field::EnableCorral) {
-                    "Corral is off".into()
-                } else {
-                    row.row.text.to_string()
-                };
+            let corral_off = row.row.kind == RowKind::Status && !settings.is_on(Field::EnableCorral);
+            let row_name = if corral_off { "Corral is off".into() } else { row.row.text.to_string() };
             let mut label = Measured::new(
                 format!("{id}.label"),
                 row_name.clone(),
@@ -515,7 +511,7 @@ fn measure_page(
                 Hit::Nothing,
                 RowKind::Label,
             );
-            label.help = row.row.description().unwrap_or_default();
+            label.help = if corral_off { super::content::CORRAL_OFF_DESC.to_string() } else { row.row.description().unwrap_or_default() };
             if !label.name.is_empty() {
                 out.push(label);
             }

@@ -55,6 +55,22 @@ pub(super) fn presence_plan(desktop_mode: bool, show_in_taskbar: bool, exists: b
     }
 }
 
+/// While Corral is off the icon is the way back, so it stays even with `ShowInTaskbar` off.
+pub(super) fn tray_wanted(show_in_taskbar: bool, off: bool) -> bool {
+    show_in_taskbar || off
+}
+
+/// A double click on the icon sends two clicks: the second one, just after the first turned Corral on, must not
+/// open Glance as well. Only the first click after turning on is looked at.
+pub(super) fn second_click_of_turn_on(since_turn_on_ms: Option<u128>, double_click_ms: u32) -> bool {
+    since_turn_on_ms.is_some_and(|ms| ms <= u128::from(double_click_ms))
+}
+
+/// While Corral is off a click on the icon turns it on (there are no Corrals to show).
+pub(super) fn tray_tip(off: bool) -> &'static str {
+    if off { "Corral is off. Click to turn it on" } else { "Show Corrals" }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TrayAction {
     Flip,
@@ -299,12 +315,14 @@ pub(super) struct State {
     icon_spec: Option<(i32, bool)>,
     /// While a click on the icon is being handled (the taskbar is foreground then).
     clicking: bool,
+    /// When a click on the icon turned Corral on.
+    turned_on: Option<std::time::Instant>,
 }
 
 impl App {
     /// Create or destroy the icon after a settings load (and at start).
     pub(super) fn taskbar_configure(&mut self) {
-        match presence_plan(self.detached(), self.settings.show_in_taskbar, self.taskbar.hwnd.is_some()) {
+        match presence_plan(self.detached(), tray_wanted(self.settings.show_in_taskbar, self.settings.disabled), self.taskbar.hwnd.is_some()) {
             Presence::Create => self.taskbar_create(),
             Presence::Destroy => self.taskbar_destroy(),
             Presence::Keep => {}
@@ -362,11 +380,20 @@ impl App {
             hIcon: self.taskbar.icon.unwrap_or_default(),
             ..Default::default()
         };
-        for (slot, unit) in data.szTip.iter_mut().zip("Show Corrals".encode_utf16()) {
+        for (slot, unit) in data.szTip.iter_mut().zip(tray_tip(self.settings.disabled).encode_utf16()) {
             *slot = unit;
         }
         data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         data
+    }
+
+    /// Corral was turned off or on: the tip says what a click does now.
+    pub(super) fn taskbar_off_changed(&mut self) {
+        let Some(hwnd) = self.taskbar.hwnd else { return };
+        let mut data = self.taskbar_icon_data(hwnd);
+        data.uFlags = NIF_TIP | NIF_SHOWTIP;
+        let modified = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool();
+        log(&format!("taskbar item: tip updated: {modified}"));
     }
 
     /// Add the icon (also again after Explorer restarted and broadcast TaskbarCreated).
@@ -453,12 +480,15 @@ impl App {
         let Some(hwnd) = self.taskbar.hwnd else { return };
         let choice = unsafe {
             let Ok(menu) = CreatePopupMenu() else { return };
-            let show = if self.peek.is_on() { w!("Hide Corrals") } else { w!("Show Corrals") };
+            let off = self.settings.disabled;
+            let show = if off { w!("Turn Corral on") } else if self.peek.is_on() { w!("Hide Corrals") } else { w!("Show Corrals") };
             let _ = AppendMenuW(menu, MF_STRING, MENU_SHOW, show);
             let _ = AppendMenuW(menu, MF_STRING, MENU_SETTINGS, w!("Configure Corral..."));
             crate::app_icon::set_menu_item_icon(menu, MENU_SETTINGS as u32, windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd));
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-            let _ = AppendMenuW(menu, MF_STRING, MENU_HIDE, w!("Hide this icon"));
+            if !off {
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+                let _ = AppendMenuW(menu, MF_STRING, MENU_HIDE, w!("Hide this icon"));
+            }
             let _ = SetMenuDefaultItem(menu, MENU_SHOW as u32, 0);
             // the documented tray-menu dance: owner foreground before, a WM_NULL after
             let _ = SetForegroundWindow(hwnd);
@@ -492,10 +522,33 @@ impl App {
         self.taskbar_configure();
     }
 
+    /// Corral is off and the icon was used: store the choice and bring everything back.
+    fn taskbar_turn_on(&mut self) {
+        log("taskbar item: turning Corral on");
+        let path = self.opts.settings_path.clone();
+        let mut stored = super::settings_store::load_with_backup(&path);
+        stored.disabled = false;
+        if let Err(e) = super::settings_store::save(&path, &stored) {
+            log(&format!("taskbar item: saving Disabled failed: {e}"));
+            return;
+        }
+        self.reload_settings();
+        self.page_refresh();
+    }
+
     /// `WM_TASKBAR_FLIP`: the icon was clicked. Same path as the toggle hotkey; when Peek did not come on
     /// (refused or just ended), the application the user worked in gets the foreground back from the
     /// taskbar.
     pub(super) fn taskbar_flip(&mut self) {
+        if self.settings.disabled {
+            self.taskbar_turn_on();
+            self.taskbar.turned_on = Some(std::time::Instant::now());
+            return;
+        }
+        let since = self.taskbar.turned_on.take().map(|t| t.elapsed().as_millis());
+        if second_click_of_turn_on(since, unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime() }) {
+            return;
+        }
         log("peek: taskbar item activated");
         self.taskbar.clicking = true;
         self.peek_key_event(peek_keys::EVENT_TOGGLE);
@@ -531,6 +584,24 @@ mod tests {
         assert_eq!(presence_plan(false, true, false), Presence::Keep);
         assert_eq!(presence_plan(false, true, true), Presence::Destroy);
         assert_eq!(presence_plan(false, false, false), Presence::Keep);
+    }
+
+    #[test]
+    fn the_second_click_of_a_double_click_does_not_open_glance_after_turning_on() {
+        assert!(second_click_of_turn_on(Some(100), 500));
+        assert!(!second_click_of_turn_on(Some(501), 500), "a later click is a new click");
+        assert!(!second_click_of_turn_on(None, 500), "not after turning on");
+    }
+
+    #[test]
+    fn the_icon_stays_while_corral_is_off_and_says_what_a_click_does() {
+        assert!(tray_wanted(false, true), "the way back, even with the setting off");
+        assert!(tray_wanted(true, false));
+        assert!(!tray_wanted(false, false));
+        assert_eq!(presence_plan(false, tray_wanted(false, true), false), Presence::Keep, "never in preview mode");
+        assert_eq!(tray_tip(false), "Show Corrals");
+        assert!(tray_tip(true).contains("turn it on"));
+        assert!(tray_tip(true).encode_utf16().count() < 128, "fits szTip");
     }
 
     #[test]

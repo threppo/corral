@@ -43,6 +43,8 @@ const WHEEL_STEP_DIP: f32 = 48.0;
 static COLOR_SETTINGS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// The Corral menu's "Colors..." command, relayed from the WM_COPYDATA handler (colour-state-spec 3.1).
 const WM_FOCUS_CORRAL: u32 = WM_APP + 134;
+/// Another "Configure Corral..." asked for this window (relayed from the WM_COPYDATA handler).
+const WM_RAISE_SELF: u32 = WM_APP + 139;
 use settings::style_request::{WM_COLOR_STATUS, status};
 const TIMER_LIVE_COLOR: usize = 0xC033;
 const TIMER_LOOK: usize = 0xC034;
@@ -1906,7 +1908,7 @@ fn spacing_spec(value: u32) -> crate::dialog::DialogSpec {
 fn disable_corral_spec() -> crate::dialog::DialogSpec {
     crate::dialog::DialogSpec::new(
         "Turn off Corral?",
-        "Your Corrals and Gates disappear and Windows shows the desktop icons. When you turn Corral back on, it puts every icon back in place. Changes made to the desktop meanwhile may be undone.",
+        "Your Corrals and Gates are hidden and Windows shows the desktop icons. To turn Corral back on, use its icon in the notification area or this page, and everything returns to where it was. Your files are not touched.",
         "Turn off",
     )
 }
@@ -2147,7 +2149,8 @@ fn on_click(hwnd: HWND, point: (i32, i32)) {
             let st = unsafe { &mut *state_ptr(hwnd) };
             if apply_click(&mut st.settings, page, point, dpi, width, height, scroll).is_some() {
                 save(st);
-                if matches!(page, Page::Personalization | Page::Camouflage) {
+                // Corral is turned off or on at once, not at the next 2 s look at the settings file.
+                if matches!(page, Page::Personalization | Page::Camouflage) || field == Field::EnableCorral {
                     send_look_reload(st);
                 }
                 if !super::desktop_pages::owns(page) {
@@ -3919,10 +3922,41 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
             }
             return LRESULT(0);
         }
+        WM_RAISE_SELF => {
+            unsafe {
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                // an open dialog of this window, or the window itself
+                let _ = SetForegroundWindow(GetLastActivePopup(hwnd));
+            }
+            return LRESULT(0);
+        }
         WM_COPYDATA => {
             use windows::Win32::System::DataExchange::COPYDATASTRUCT;
             if lparam.0 != 0 {
                 let data = unsafe { std::ptr::read_unaligned(lparam.0 as *const COPYDATASTRUCT) };
+                if data.dwData == settings::style_request::RAISE_MAGIC {
+                    let valid = data.cbData != 0
+                        && data.cbData as usize <= settings::style_request::RELOAD_MAX_BYTES * 4
+                        && !data.lpData.is_null();
+                    let request = valid
+                        .then(|| unsafe {
+                            std::slice::from_raw_parts(data.lpData as *const u8, data.cbData as usize)
+                        })
+                        .and_then(|bytes| settings::style_request::ReloadRequest::decode(settings::style_request::RELOAD_MAGIC, bytes).ok());
+                    let st = unsafe { &*ptr };
+                    return match request {
+                        Some(r) if settings::style_request::same_layout(&r.layout_path, &st.layout_path) => {
+                            unsafe {
+                                let _ = PostMessageW(hwnd, WM_RAISE_SELF, WPARAM(0), LPARAM(0));
+                            }
+                            LRESULT(1)
+                        }
+                        Some(_) => LRESULT(0),
+                        None => LRESULT(2),
+                    };
+                }
                 if data.dwData == settings::style_request::FOCUS_MAGIC {
                     let valid = data.cbData != 0
                         && data.cbData as usize <= settings::style_request::FOCUS_MAX_BYTES * 4
@@ -3951,9 +3985,11 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
         // keep this window's next save from putting the old style back.
         WM_ACTIVATE if wparam.0 & 0xffff != 0 => {
             if let Some(st) = state_mut(hwnd) {
-                let stored = settings::load_with_backup(&st.path).tabs_style;
-                if st.settings.tabs_style != stored {
-                    st.settings.tabs_style = stored;
+                // Changed outside this window (the Corral menu, the tray icon): a later save must not undo them.
+                let stored = settings::load_with_backup(&st.path);
+                if (st.settings.tabs_style, st.settings.disabled) != (stored.tabs_style, stored.disabled) {
+                    st.settings.tabs_style = stored.tabs_style;
+                    st.settings.disabled = stored.disabled;
                     invalidate(hwnd);
                 }
             }

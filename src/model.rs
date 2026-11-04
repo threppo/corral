@@ -33,6 +33,79 @@ pub enum GroupContent {
     Portal { path: String },
 }
 
+/// Where a Corral stood before it was moved to stay reachable, so it can go back when the display returns.
+/// `moved_to` is where that move left it: a Corral found elsewhere was moved by the user, whose choice wins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RescuedHome {
+    pub monitor: String,
+    pub x: i32,
+    pub y: i32,
+    pub moved_to: (i32, i32),
+}
+
+/// A display change can round a stored position by a DIP or two; no user move is that small.
+const RESCUE_TOLERANCE_DIP: i32 = 2;
+
+impl Group {
+    /// After keeping the Corral reachable: `from` is its monitor and position before that. Nothing moved, nothing
+    /// to remember. A Corral already away keeps its first home, unless the user moved it since: then `from` is
+    /// their choice and the new home.
+    pub fn note_rescue(&mut self, from: (String, i32, i32)) {
+        let now = (self.rect.left, self.rect.top);
+        if (from.1, from.2) == now {
+            return;
+        }
+        match &mut self.rescued_home {
+            Some(home) if !Self::moved_since((from.1, from.2), home.moved_to) => home.moved_to = now,
+            _ => self.rescued_home = Some(RescuedHome { monitor: from.0, x: from.1, y: from.2, moved_to: now }),
+        }
+    }
+
+    fn moved_since(at: (i32, i32), moved_to: (i32, i32)) -> bool {
+        (at.0 - moved_to.0).abs() > RESCUE_TOLERANCE_DIP || (at.1 - moved_to.1).abs() > RESCUE_TOLERANCE_DIP
+    }
+
+    /// Its monitor is gone and placing it elsewhere will overwrite that name: remember it first, so the Corral can go
+    /// back when the monitor returns. It has not moved yet, and a later rescue only updates `moved_to`.
+    pub fn note_monitor_gone(&mut self) {
+        if self.rescued_home.is_none() {
+            let (x, y) = (self.rect.left, self.rect.top);
+            self.rescued_home = Some(RescuedHome { monitor: self.monitor.clone(), x, y, moved_to: (x, y) });
+        }
+    }
+
+    /// The monitor's work area moved and took the stored rect with it (a taskbar on the top or left): that is no user
+    /// move, so what is remembered follows. A home on another monitor is not affected.
+    pub fn rebase_home(&mut self, dx: i32, dy: i32) {
+        let monitor = self.monitor.clone();
+        if let Some(home) = &mut self.rescued_home {
+            home.moved_to = (home.moved_to.0 + dx, home.moved_to.1 + dy);
+            if home.monitor == monitor {
+                home.x += dx;
+                home.y += dy;
+            }
+        }
+    }
+
+    /// Put a rescued Corral back when its monitor exists; true when it moved. Its size stays: fitting grows it back
+    /// to its preferred size. If it no longer fits, the rescue runs again and remembers the same home.
+    pub fn return_home(&mut self, monitor_exists: impl Fn(&str) -> bool) -> bool {
+        let Some(home) = self.rescued_home.clone() else { return false };
+        if Self::moved_since((self.rect.left, self.rect.top), home.moved_to) {
+            self.rescued_home = None;
+            return false;
+        }
+        if !monitor_exists(&home.monitor) {
+            return false;
+        }
+        self.rescued_home = None;
+        let (width, height) = (self.rect.width(), self.rect.height());
+        self.monitor = home.monitor;
+        self.rect = Rect::new(home.x, home.y, home.x + width, home.y + height);
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Group {
     pub id: u64,
@@ -47,6 +120,9 @@ pub struct Group {
     /// Corral choice: User-selected expanded body size before fitting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_size_dip: Option<(i32, i32)>,
+    /// Set while the Corral stands somewhere else only because a display was too small for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rescued_home: Option<RescuedHome>,
     pub content: GroupContent,
     #[serde(default)]
     pub roll: RollState,
@@ -544,7 +620,7 @@ impl Layout {
 
     pub fn add_group(&mut self, title: String, monitor: String, rect: Rect, content: GroupContent) -> u64 {
         let id = self.allocate_id();
-        self.groups.push(Group { id, tab: None, title, monitor, rect, preferred_size_dip: None, content, roll: RollState::Expanded, dock_top: false, dock_bottom: false, scroll: 0, nav_history: Vec::new(), view_flags: 0, hide_link_overlays: false, sort_method: 0, sort_flags: 0, swipe_index: 0, all_pages: false, opacity: 255, style: GroupStyle::default(), title_side: -1, title_side_last: -1, icon_zoom: None, legacy_scroll: IgnoredKey, extra: Default::default() });
+        self.groups.push(Group { id, tab: None, title, monitor, rect, preferred_size_dip: None, rescued_home: None, content, roll: RollState::Expanded, dock_top: false, dock_bottom: false, scroll: 0, nav_history: Vec::new(), view_flags: 0, hide_link_overlays: false, sort_method: 0, sort_flags: 0, swipe_index: 0, all_pages: false, opacity: 255, style: GroupStyle::default(), title_side: -1, title_side_last: -1, icon_zoom: None, legacy_scroll: IgnoredKey, extra: Default::default() });
         id
     }
 
@@ -1456,5 +1532,123 @@ mod camouflage_storage_tests {
             style.migrate_tint_source(0, 0);
             assert_eq!(style.tint_icons_color_source.as_deref(), Some(source));
         }
+    }
+}
+
+#[cfg(test)]
+mod rescued_home_tests {
+    use super::*;
+
+    fn group(rect: Rect) -> Group {
+        let mut layout = Layout::new();
+        layout.add_group("QA".into(), "DISPLAY1".into(), rect, GroupContent::Items { items: Vec::new() });
+        layout.groups.remove(0)
+    }
+
+    /// A Corral stood at 2191, a smaller monitor alone moved it to 1323, and the bigger monitor came back.
+    #[test]
+    fn a_rescued_corral_goes_back_when_the_display_returns() {
+        let mut g = group(Rect::new(1323, 0, 1536, 792));
+        g.note_rescue(("DISPLAY1".into(), 2191, 0));
+        assert!(g.return_home(|m| m == "DISPLAY1"));
+        assert_eq!(g.rect, Rect::new(2191, 0, 2404, 792), "same size: fitting grows it back");
+        assert_eq!(g.rescued_home, None);
+        assert!(!g.return_home(|_| true), "once");
+    }
+
+    #[test]
+    fn a_corral_the_user_moved_stays_where_they_put_it() {
+        let mut g = group(Rect::new(1323, 0, 1536, 792));
+        g.note_rescue(("DISPLAY1".into(), 2191, 0));
+        g.rect = g.rect.offset(40, 0);
+        assert!(!g.return_home(|_| true));
+        assert_eq!((g.rect.left, g.rescued_home.clone()), (1363, None));
+    }
+
+    #[test]
+    fn rounding_by_a_display_change_is_not_a_user_move() {
+        let mut g = group(Rect::new(1323, 0, 1536, 792));
+        g.note_rescue(("DISPLAY1".into(), 2191, 0));
+        g.rect = g.rect.offset(1, -1);
+        assert!(g.return_home(|_| true));
+        assert_eq!((g.rect.left, g.rect.top), (2191, 0));
+    }
+
+    #[test]
+    fn it_waits_while_its_monitor_is_away_and_keeps_its_first_home() {
+        let mut g = group(Rect::new(100, 0, 300, 200));
+        g.note_rescue(("DISPLAY2".into(), 900, 50));
+        assert!(!g.return_home(|m| m == "DISPLAY1"));
+        assert!(g.rescued_home.is_some(), "still remembered");
+        g.rect = Rect::new(60, 0, 260, 200);
+        g.note_rescue(("DISPLAY1".into(), 100, 0));
+        assert_eq!(g.rescued_home, Some(RescuedHome { monitor: "DISPLAY2".into(), x: 900, y: 50, moved_to: (60, 0) }));
+    }
+
+    /// Moved by the user while away, then shifted by a taskbar change: their position is the home now, not the old one.
+    #[test]
+    fn a_rescue_after_a_user_move_does_not_bring_the_old_home_back() {
+        let mut g = group(Rect::new(1323, 0, 1536, 792));
+        g.note_rescue(("DISPLAY1".into(), 2191, 0));
+        g.rect = Rect::new(600, 300, 813, 1092);
+        let from = ("DISPLAY1".to_string(), g.rect.left, g.rect.top);
+        g.rect = Rect::new(600, 250, 813, 1042);
+        g.note_rescue(from);
+        assert!(g.return_home(|_| true));
+        assert_eq!((g.rect.left, g.rect.top), (600, 300));
+    }
+
+    /// Two monitors on, a Corral on the second, and the second goes away: placing it elsewhere overwrites the name.
+    #[test]
+    fn a_corral_whose_monitor_went_away_goes_back_to_it() {
+        let mut g = group(Rect::new(900, 50, 1100, 250));
+        g.monitor = "DISPLAY2".into();
+        g.note_monitor_gone();
+        g.monitor = "DISPLAY1".into();
+        g.rect = Rect::new(700, 50, 900, 250);
+        g.note_rescue(("DISPLAY1".into(), 900, 50));
+        assert!(!g.return_home(|m| m == "DISPLAY1"), "still away");
+        assert!(g.return_home(|m| m == "DISPLAY2"));
+        assert_eq!((g.monitor.as_str(), g.rect.left, g.rect.top), ("DISPLAY2", 900, 50));
+    }
+
+    #[test]
+    fn noting_a_gone_monitor_keeps_a_home_it_already_has() {
+        let mut g = group(Rect::new(100, 0, 300, 200));
+        g.note_rescue(("DISPLAY2".into(), 900, 50));
+        g.note_monitor_gone();
+        assert_eq!(g.rescued_home.as_ref().map(|h| (h.monitor.as_str(), h.x)), Some(("DISPLAY2", 900)));
+    }
+
+    /// A taskbar moving to the top shifts the stored rect: that must not read as a user move.
+    #[test]
+    fn a_work_area_shift_is_not_a_user_move() {
+        let mut g = group(Rect::new(1323, 0, 1536, 792));
+        g.note_rescue(("DISPLAY1".into(), 2191, 0));
+        g.rect = g.rect.offset(0, -48);
+        g.rebase_home(0, -48);
+        assert!(g.return_home(|_| true));
+        assert_eq!((g.rect.left, g.rect.top), (2191, -48));
+    }
+
+    #[test]
+    fn nothing_moved_nothing_remembered() {
+        let mut g = group(Rect::new(100, 0, 300, 200));
+        g.note_rescue(("DISPLAY1".into(), 100, 0));
+        assert_eq!(g.rescued_home, None);
+    }
+
+    #[test]
+    fn a_layout_without_the_field_loads_and_saving_leaves_it_out() {
+        let g = group(Rect::new(1, 2, 3, 4));
+        let json = serde_json::to_value(&g).unwrap();
+        assert!(json.get("rescued_home").is_none());
+        let back: Group = serde_json::from_value(json).unwrap();
+        assert_eq!(back.rescued_home, None);
+        let mut away = g.clone();
+        away.rect = Rect::new(9, 9, 11, 11);
+        away.note_rescue(("DISPLAY1".into(), 1, 2));
+        let back: Group = serde_json::from_value(serde_json::to_value(&away).unwrap()).unwrap();
+        assert_eq!(back.rescued_home, away.rescued_home);
     }
 }

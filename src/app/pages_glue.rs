@@ -162,7 +162,7 @@ impl App {
     }
 
     pub(super) fn page_layer_visible(&self, group: &Group) -> bool {
-        self.page_group_visible(group) && (!self.pages.moving() || group.all_pages || matches!(self.drag, Drag::MoveGroup { id, .. } if id == group.id))
+        !self.settings.disabled && self.page_group_visible(group) && (!self.pages.moving() || group.all_pages || matches!(self.drag, Drag::MoveGroup { id, .. } if id == group.id))
     }
 
     pub(super) fn page_refresh(&mut self) {

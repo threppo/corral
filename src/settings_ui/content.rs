@@ -354,6 +354,10 @@ const fn lbl(text: &'static str) -> Row {
 const fn note(text: &'static str) -> Row {
     Row::new(RowKind::Note, text, None)
 }
+const CORRAL_ON_DESC: &str = "Your Corrals, Gates and shortcuts are active. Turn Corral off to show the plain desktop.";
+/// The Welcome status row while Corral is off; no longer than the text the row's height was measured for.
+pub const CORRAL_OFF_DESC: &str = "Your Corrals, Gates and shortcuts are paused. Turn Corral on to bring them back.";
+
 const fn card_l(text: &'static str, desc: &'static str) -> Row {
     Row::new(RowKind::Label, text, Some(desc))
 }
@@ -385,7 +389,7 @@ pub fn content(page: Page) -> PageContent {
             subtitle: "Keep desktop icons in Corrals and browse folders through Gates.",
             master: None,
             sections: vec![
-                sec("", vec![Row::new(RowKind::Status, "Corral is on", Some("Your Corrals, Gates and shortcuts are active. Turn Corral off to show the plain desktop.")).b(Field::EnableCorral)]),
+                sec("", vec![Row::new(RowKind::Status, "Corral is on", Some(CORRAL_ON_DESC)).b(Field::EnableCorral)]),
                 sec("Get started", vec![
                     Row::new(RowKind::NumberedStep, "Create a Corral", Some("Drag across an empty part of the desktop, then choose Create Corral here.")).v(Field::EnableCorral, 1),
                     Row::new(RowKind::NumberedStep, "Name it", Some("Right-click the Corral title, choose Rename Corral and type a name.")).v(Field::EnableCorral, 2),
@@ -771,6 +775,11 @@ pub fn combo_choices_for_build(field: Field, current: i64, build: u32) -> Vec<(S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_off_text_fits_the_row_measured_for_the_on_text() {
+        assert!(super::CORRAL_OFF_DESC.len() <= super::CORRAL_ON_DESC.len());
+    }
+
     use super::*;
     use crate::settings::{LayoutFlags, Settings, set_layout_flags};
 

@@ -208,6 +208,7 @@ fn copy_shared(from: &Group, to: &mut Group) {
     to.monitor = from.monitor.clone();
     to.rect = from.rect;
     to.preferred_size_dip = from.preferred_size_dip;
+    to.rescued_home = from.rescued_home.clone();
     to.roll = from.roll;
     to.dock_top = from.dock_top;
     to.dock_bottom = from.dock_bottom;
@@ -226,6 +227,7 @@ fn private_view(group: &Group) -> Group {
     g.monitor = String::new();
     g.rect = Rect::default();
     g.preferred_size_dip = None;
+    g.rescued_home = None;
     g.roll = RollState::Expanded;
     g.dock_top = false;
     g.dock_bottom = false;

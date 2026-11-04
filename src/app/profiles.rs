@@ -118,6 +118,41 @@ impl App {
         }
     }
 
+    /// Corrals moved only because a display was too small go back where they stood. A remembered setup has its own
+    /// positions, so it does not use this.
+    pub(super) fn return_rescued_groups(&mut self) {
+        if self.profiles_enabled() { return; }
+        let Some(live) = self.display_snapshot.clone() else { return };
+        let mut any = false;
+        for g in &mut self.layout.groups {
+            let id = g.id;
+            if g.return_home(|m| live.find(m).is_some()) {
+                log(&format!("group {id}: back where it stood, on {} at {},{}", g.monitor, g.rect.left, g.rect.top));
+                any = true;
+            } else if !live.displays().is_empty() && live.find(&g.monitor).is_none() {
+                g.note_monitor_gone();
+                any = true;
+            }
+        }
+        if any { self.layout.sync_all_tab_sets(); }
+    }
+
+    /// A display change must not depend on one message: in a monitor switch `WM_DISPLAYCHANGE` can arrive while the
+    /// monitors are still changing, or not at all, and Corrals then keep the old scale until some later message
+    /// (2026-11-04, a monitor turned back on). Every settings tick compares. Not the preview: its "display" is its window.
+    pub(super) fn profile_poll_displays(&mut self) {
+        if self.opts.mode != Mode::Desktop || self.profile_pending.is_some() { return; }
+        let Some(live) = self.current_display_snapshot() else { return };
+        // no reading to compare with (the first one failed mid-switch): this one is adopted
+        let same = self.display_snapshot.as_ref().is_some_and(|old| dpi::classify(old, &live).kind() == EventKind::Unchanged);
+        if live.displays().is_empty() || same { return; }
+        log("display change noticed by the poll");
+        self.draw_cancel(crate::creation::CancelReason::DisplayChange);
+        crate::tint::invalidate_wallpaper();
+        self.peek_fullscreen_refresh();
+        self.profile_displays_changed();
+    }
+
     pub(super) fn profile_displays_changed(&mut self) {
         let Some(live) = self.current_display_snapshot() else { return };
         let Some(old) = self.display_snapshot.clone() else {
@@ -159,7 +194,10 @@ impl App {
                 // directly, then record the final coherent work snapshot below.
                 for g in &mut self.layout.groups {
                     if let Some((a, b)) = old.find(&g.monitor).zip(live.find(&g.monitor)) {
-                        if let Some(rect) = dpi::rebase_work_origin(g.rect, a, b) { g.rect = rect; }
+                        if let Some(rect) = dpi::rebase_work_origin(g.rect, a, b) {
+                            g.rebase_home(rect.left - g.rect.left, rect.top - g.rect.top);
+                            g.rect = rect;
+                        }
                     }
                 }
                 for p in self.layout.loose.values_mut() {
@@ -170,6 +208,7 @@ impl App {
             }
         }
         self.monitors = snapshot_monitors(&live); self.display_snapshot = Some(live);
+        if changes.dpi || changes.topology { self.return_rescued_groups(); }
         self.rebuild_runtime_bodies();
         for (id, r) in work_bodies { self.apply_body_placement(id, r); }
         self.clamp_profile_titles();
@@ -251,6 +290,7 @@ impl App {
                 if let Some(body) = dpi::RequestedBody::from_physical(body) { self.apply_body_placement(id,body); }
                 let _ = self.layout.sync_tab_common(id);
             }
+            let before = self.layout.groups.iter().find(|g| g.id == id).map(|g| (g.monitor.clone(), g.rect.left, g.rect.top));
             self.contain_fitted_group(id);
             for _ in 0..4 {
                 let Some(g) = self.layout.groups.iter().find(|g| g.id == id) else { continue };
@@ -267,6 +307,9 @@ impl App {
                 let Some(clamped) = dpi::clamp_title(body, d, reach) else { continue };
                 self.apply_body_placement(id, clamped);
                 if clamped == body { break; }
+            }
+            if !self.profiles_enabled() {
+                if let (Some(before), Some(g)) = (before, self.layout.group_mut(id)) { g.note_rescue(before); }
             }
         }
         self.layout.sync_all_tab_sets();

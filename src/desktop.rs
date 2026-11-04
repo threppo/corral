@@ -5,13 +5,16 @@
 //!   `WorkerW` of `Progman` (observed on 10.0.26200).
 //! - Earlier: `SHELLDLL_DefView` under `Progman` or under a top-level `WorkerW` sibling.
 //!
-//! Hiding uses a non-persistent `ShowWindow(SW_HIDE)` and is undone only when the list view was
-//! initially visible (so a user's own "Show desktop icons = off" is preserved).
+//! Hiding uses a non-persistent `ShowWindow(SW_HIDE)` and is undone unless the user's own "Show desktop
+//! icons" is off. That is read from the shell's setting, not from the window: while Explorer starts, or after
+//! a Corral that was killed, the list view is hidden although the user wants icons.
 
 use crate::geometry::{Monitor, Rect};
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::Foundation::{BOOL, CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, RECT, TRUE};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Shell::{SHELLSTATEA, SHGetSetSettings, SSF_HIDEICONS};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
     ShowWindow, SW_HIDE, SW_SHOWNA,
@@ -28,6 +31,7 @@ pub struct DesktopHost {
     /// Wallpaper WorkerW (child of Progman on 24H2+, top-level sibling earlier), if present.
     pub wallpaper: Option<HWND>,
     pub explorer_pid: u32,
+    /// Windows should show the list view when Corral does not: the user's "Show desktop icons" is on.
     pub listview_was_visible: bool,
 }
 
@@ -79,8 +83,76 @@ pub fn find_host() -> Option<DesktopHost> {
             .into_iter()
             .find(|w| *w != view_parent && window_pid(*w) == explorer_pid && child(*w, w!("SHELLDLL_DefView")).is_none())
     });
-    let listview_was_visible = unsafe { IsWindowVisible(listview) }.as_bool();
+    let listview_was_visible = !user_hides_desktop_icons();
     Some(DesktopHost { progman, view_parent, defview, listview, wallpaper, explorer_pid, listview_was_visible })
+}
+
+/// `SHELLSTATE.fHideIcons` is the 13th bit field of the structure (public `SHELLSTATE` documentation).
+const FHIDEICONS_BIT: i32 = 1 << 12;
+
+fn hide_icons_of(bits: i32) -> bool {
+    bits & FHIDEICONS_BIT != 0
+}
+
+/// The user's "Show desktop icons" is off (the desktop's View menu).
+fn user_hides_desktop_icons() -> bool {
+    let mut state = SHELLSTATEA::default();
+    unsafe { SHGetSetSettings(Some(&mut state), SSF_HIDEICONS, BOOL(0)) };
+    hide_icons_of(state._bitfield1)
+}
+
+/// `find_host`, tried until `limit` has passed: at login Explorer may not have made its desktop yet.
+pub fn wait_for_host(limit: std::time::Duration) -> Option<DesktopHost> {
+    poll_until(limit, std::time::Duration::from_millis(500), find_host)
+}
+
+fn poll_until<T>(limit: std::time::Duration, step: std::time::Duration, mut find: impl FnMut() -> Option<T>) -> Option<T> {
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(found) = find() {
+            return Some(found);
+        }
+        if start.elapsed() >= limit {
+            return None;
+        }
+        std::thread::sleep(step);
+    }
+}
+
+/// A named lock held until it is dropped or the process ends, also by a crash.
+pub struct NamedLock(HANDLE);
+
+impl Drop for NamedLock {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+pub enum LockOutcome {
+    Held(NamedLock),
+    /// Another process holds it.
+    Taken,
+    /// Windows gave no answer.
+    Unavailable,
+}
+
+/// `Local\`: per Windows session, each with its own desktop. The handle is not inheritable, so the watchdog and
+/// the Settings processes do not keep it after Corral ends.
+pub fn take_desktop_lock() -> LockOutcome {
+    take_lock(w!("Local\\CorralDesktop"))
+}
+
+fn take_lock(name: PCWSTR) -> LockOutcome {
+    match unsafe { CreateMutexW(None, false, name) } {
+        Ok(handle) if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS => {
+            drop(NamedLock(handle));
+            LockOutcome::Taken
+        }
+        Ok(handle) => LockOutcome::Held(NamedLock(handle)),
+        Err(_) => LockOutcome::Unavailable,
+    }
 }
 
 /// True if `hwnd` is still the Explorer desktop list view recorded at attach time.
@@ -199,6 +271,42 @@ pub fn describe(host: &DesktopHost) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_hide_icons_bit_says_the_user_hides_the_icons() {
+        assert!(hide_icons_of(1 << 12));
+        assert!(hide_icons_of(-1));
+        assert!(!hide_icons_of(0));
+        assert!(!hide_icons_of(!(1 << 12)));
+    }
+
+    #[test]
+    fn waiting_for_the_desktop_retries_and_gives_up_at_the_limit() {
+        use std::time::Duration;
+        let mut tries = 0;
+        let found = poll_until(Duration::from_secs(5), Duration::ZERO, || {
+            tries += 1;
+            (tries == 3).then_some("host")
+        });
+        assert_eq!((found, tries), (Some("host"), 3));
+        let mut tries = 0;
+        let none: Option<()> = poll_until(Duration::ZERO, Duration::ZERO, || {
+            tries += 1;
+            None
+        });
+        assert_eq!((none, tries), (None, 1), "one try at least, then it gives up");
+    }
+
+    #[test]
+    fn the_lock_has_one_holder_and_is_free_again_after_it_ends() {
+        let name = windows::core::HSTRING::from(format!("Local\\CorralLockTest-{}", std::process::id()));
+        let first = take_lock(PCWSTR(name.as_ptr()));
+        assert!(matches!(first, LockOutcome::Held(_)));
+        assert!(matches!(take_lock(PCWSTR(name.as_ptr())), LockOutcome::Taken), "a second start is refused");
+        assert!(matches!(take_lock(PCWSTR(name.as_ptr())), LockOutcome::Taken), "a refused start did not take it over");
+        drop(first);
+        assert!(matches!(take_lock(PCWSTR(name.as_ptr())), LockOutcome::Held(_)), "free after the holder ended");
+    }
 
     #[test]
     fn only_a_no_scroll_list_loses_its_bars() {

@@ -417,6 +417,38 @@ pub fn send_focus(request: &FocusRequest) -> LiveOutcome {
     }
     LiveOutcome::Unavailable
 }
+// "Configure Corral...": bring the open settings window of this layout forward instead of starting another.
+// The payload is a `ReloadRequest`: only the layout path.
+pub const RAISE_MAGIC: usize = 0x4352_5253 + 1;
+/// `Applied` when an open settings window of `layout_path` took it; otherwise the caller starts one.
+pub fn send_raise(layout_path: &Path) -> LiveOutcome {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    use windows::Win32::System::DataExchange::COPYDATASTRUCT;
+    use windows::core::w;
+    let Some(bytes) = ReloadRequest::new(layout_path.to_path_buf()).encode() else { return LiveOutcome::Rejected };
+    let data = COPYDATASTRUCT { dwData: RAISE_MAGIC, cbData: bytes.len() as u32, lpData: bytes.as_ptr() as *mut _ };
+    let start = std::time::Instant::now();
+    let mut after = HWND::default();
+    for _ in 0..16 {
+        let Ok(hwnd) = (unsafe { FindWindowExW(HWND::default(), after, w!("CorralSettings"), None) }) else { break };
+        if hwnd.is_invalid() { break; }
+        after = hwnd;
+        let left = 500u128.saturating_sub(start.elapsed().as_millis());
+        if left == 0 { break; }
+        // The menu click gave this process the right to change the foreground; the window needs it to come forward.
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            let _ = AllowSetForegroundWindow(pid);
+        }
+        let mut result = 0usize;
+        let answered = unsafe { SendMessageTimeoutW(hwnd, WM_COPYDATA, WPARAM(0), LPARAM(&data as *const _ as isize), SMTO_ABORTIFHUNG | SMTO_BLOCK, left as u32, Some(&mut result)) };
+        if answered.0 != 0 && result == 1 { return LiveOutcome::Applied; }
+    }
+    LiveOutcome::Unavailable
+}
+
 /// True while a settings window of the process `owner` (low 16 bits of its id, see
 /// `color_state::session_owner`) exists: the engine drops a draft overlay when its window is gone.
 pub fn settings_window_of(owner: u32) -> bool {
@@ -656,6 +688,7 @@ mod tests {
 
     #[test]
     fn reload_payload_validation() {
+        assert!(![RELOAD_MAGIC, LIVE_MAGIC, FOCUS_MAGIC].contains(&RAISE_MAGIC), "each request has its own magic");
         let r = ReloadRequest::new("QA/layout.json".into());
         let bytes = r.encode().unwrap();
         assert_eq!(ReloadRequest::decode(RELOAD_MAGIC, &bytes).unwrap(), r);

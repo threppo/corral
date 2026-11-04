@@ -80,6 +80,12 @@ fn main() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(default_layout_path);
             let page = args.iter().position(|a| a == "--page").and_then(|i| args.get(i + 1)).and_then(|n| settings_ui::Page::from_name(n));
+            // Started again while one is open (two quick menu clicks, a shortcut): that one comes forward.
+            // `--page` and a colour target ask for a particular view, so they keep their own window.
+            if page.is_none() && std::env::var_os("CORRAL_SETTINGS_COLOR_TARGET").is_none()
+                && settings::style_request::send_raise(&layout) == settings::style_request::LiveOutcome::Applied {
+                std::process::exit(0);
+            }
             tint::use_for_settings_only();
             std::process::exit(settings_ui::run_settings_window(&path, &layout, page));
         }
@@ -91,9 +97,31 @@ fn main() {
             let answer = sort_prompt::ask(args.iter().any(|a| a == "--isdesktop"));
             println!("{answer:?}");
         }
-        _ => std::process::exit(app::run(parse_options(&args))),
+        _ => {
+            let options = parse_options(&args);
+            // One Corral on a desktop: two would act on one layout and settings file. The lock lives until the
+            // process ends. Only desktop mode takes it, so a preview can run beside the real Corral.
+            let _desktop_lock = if options.mode == app::Mode::Desktop {
+                match desktop::take_desktop_lock() {
+                    desktop::LockOutcome::Held(lock) => Some(lock),
+                    desktop::LockOutcome::Taken => {
+                        app::log("corral: another Corral already runs on this desktop, not starting");
+                        eprintln!("corral: another Corral already runs on this desktop");
+                        std::process::exit(EXIT_ALREADY_RUNNING);
+                    }
+                    // Better a second Corral than no Corral: this is only a guard.
+                    desktop::LockOutcome::Unavailable => None,
+                }
+            } else {
+                None
+            };
+            std::process::exit(app::run(options));
+        }
     }
 }
+
+/// `--desktop` while another Corral runs on this desktop: nothing was touched.
+const EXIT_ALREADY_RUNNING: i32 = 3;
 
 /// Read-only: list a folder the way a Folder Portal orders it. Changes nothing.
 fn probe_portal(path: &str) {

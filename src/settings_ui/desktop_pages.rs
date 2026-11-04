@@ -259,11 +259,8 @@ pub(super) fn draw(
         )?;
         (x + px(36.0), x + w, y + px(12.0))
     };
-    let title = if row.kind == RowKind::Status && !settings.is_on(Field::EnableCorral) {
-        "Corral is off"
-    } else {
-        row.text
-    };
+    let off = row.kind == RowKind::Status && !settings.is_on(Field::EnableCorral);
+    let title = if off { "Corral is off" } else { row.text };
     for line in wrap(title, px(14.0), 600, right - tx)? {
         text(
             ctx,
@@ -277,7 +274,7 @@ pub(super) fn draw(
         yy += px(20.0);
     }
     yy += px(2.0);
-    if let Some(desc) = row.desc {
+    if let Some(desc) = if off { Some(content::CORRAL_OFF_DESC) } else { row.desc } {
         for line in wrap(desc, px(12.0), 400, right - tx)? {
             text(
                 ctx,

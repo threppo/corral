@@ -239,6 +239,8 @@ pub(super) fn finish_restore(
 /// Replace Corral's layout and settings files with the snapshot's (settings without the
 /// request/result fields). These are the only two files written; the first failure stops.
 fn preserve_restore_preferences(target: &mut Settings, current: &Settings) {
+    // Corral being on or off is the user's current choice: restoring a backup neither hides nor shows the desktop.
+    target.disabled = current.disabled;
     // Restore choices belong to the prompt session, not to the captured layout.
     for key in ["SnapshotBeforeRestore", "CorralSnapshotBackupFirst"] {
         if let Some(value) = current.tips.get(key) {
@@ -661,6 +663,7 @@ impl App {
             self.page_cancel_motion();
         }
         self.load_items();
+        self.return_rescued_groups();
         self.rebuild_runtime_bodies();
         self.clamp_profile_titles();
         self.acknowledge_desk_display();
@@ -1031,6 +1034,15 @@ mod u4_restore_preferences {
         preserve_restore_preferences(&mut captured, &Settings::default());
         assert!(!captured.tips.contains_key("SnapshotBeforeRestore"));
         assert!(!captured.tips.contains_key("CorralSnapshotBackupFirst"));
+    }
+    #[test]
+    fn restoring_a_backup_leaves_corral_on_or_off_as_it_is_now() {
+        let mut captured = Settings { disabled: true, ..Settings::default() };
+        preserve_restore_preferences(&mut captured, &Settings::default());
+        assert!(!captured.disabled);
+        let mut captured = Settings::default();
+        preserve_restore_preferences(&mut captured, &Settings { disabled: true, ..Settings::default() });
+        assert!(captured.disabled);
     }
     #[test]
     fn engine_name_validation_accepts_exactly_255_unicode_characters() {
