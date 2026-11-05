@@ -137,6 +137,13 @@ fn raster_demand_fingerprint<'a>(
     hash.finish()
 }
 
+/// Whether a refresh should extract an item's own icon. A Gate draws through the group raster cache, visible rows
+/// only, so a Gate item has no icon of its own: extracting one for every file froze the UI for seconds on a big folder
+/// (about 2 ms each, on the UI thread, measured 2026-11-05). `render_ghost` extracts the one that gets dragged.
+fn item_icon_is_stale(gate: Option<u64>, current: Option<&crate::icon_overlay::CacheKey>, wanted: &crate::icon_overlay::CacheKey) -> bool {
+    gate.is_none() && current != Some(wanted)
+}
+
 thread_local! {
     // Kept here to avoid changing the App/Item fields. The app has
     // one UI thread; item reload resets it and render prunes unused identities.
@@ -247,7 +254,7 @@ impl App {
         let size = self.icon_px.max(16) as u32;
         for item in &mut self.items {
             let key = crate::icon_overlay::CacheKey::new(&item.shell.parsing_name, size, policy);
-            if item.icon.as_ref().and_then(|i| i.cache_key.as_ref()) != Some(&key) {
+            if item_icon_is_stale(item.gate, item.icon.as_ref().and_then(|i| i.cache_key.as_ref()), &key) {
                 item.icon = shell::icon_for_policy(&item.shell, size, policy).ok();
             }
         }
@@ -1086,5 +1093,22 @@ mod rename_name_tests {
         assert_eq!(rename_selection_end(r"C:\d\report.pdf", "report", false), None, "hidden: all of it");
         assert_eq!(rename_selection_end(r"C:\d\my.folder", "my.folder", true), None);
         assert_eq!(rename_selection_end(r"C:\d\.gitignore", ".gitignore", false), None);
+    }
+}
+
+#[cfg(test)]
+mod gate_icon_tests {
+    use super::item_icon_is_stale;
+
+    #[test]
+    fn a_gate_item_never_asks_for_its_own_icon() {
+        let policy = crate::icon_overlay::Policy(0);
+        let key = crate::icon_overlay::CacheKey::new("qa.txt", 32, policy);
+        let other = crate::icon_overlay::CacheKey::new("qa.txt", 48, policy);
+        assert!(!item_icon_is_stale(Some(7), None, &key), "a whole big folder must not be extracted");
+        assert!(!item_icon_is_stale(Some(7), Some(&other), &key));
+        assert!(item_icon_is_stale(None, None, &key), "a desktop item still gets its icon");
+        assert!(item_icon_is_stale(None, Some(&other), &key), "and a new one when the size or policy changes");
+        assert!(!item_icon_is_stale(None, Some(&key), &key));
     }
 }

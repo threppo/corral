@@ -617,8 +617,19 @@ impl App {
         }
     }
 
+    /// A Gate item has no icon of its own (`item_icon_is_stale`), so the one being dragged gets it here for the drag image.
+    fn extract_gate_ghost_icon(&mut self) {
+        let Drag::Item { name, .. } = &self.drag else { return };
+        let Some(index) = self.items.iter().position(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)) else { return };
+        if self.items[index].gate.is_none() || self.items[index].icon.is_some() { return; }
+        let policy = crate::icon_overlay::Policy(self.settings.hide_shortcut_overlays);
+        let icon = crate::shell::icon_for_policy(&self.items[index].shell, self.icon_px.max(16) as u32, policy).ok();
+        self.items[index].icon = icon;
+    }
+
     /// Draw/position the translucent drag image (icon + label at 60 % opacity).
     fn render_ghost(&mut self) {
+        self.extract_gate_ghost_icon();
         let Drag::Item { name, current, grab, owner, .. } = &self.drag else { return };
         let Some(item) = self.items.iter().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)) else { return };
         let list = self.groups.iter().find(|g| g.hwnd == *owner).and_then(|gw| {
