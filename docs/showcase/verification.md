@@ -57,7 +57,31 @@ and a scratch settings file, not real desktop items or settings.
   from the same source as `72d75fc`. The Personalization page was left out because its preview
   shows the real wallpaper.
 
+## Demo recording (5 November 2026)
+
+Run by Claude Code on v0.2.1 plus two test-only hooks, as a release build, in preview mode with
+sample files. [How it was recorded](demo-script.md), including what was set up in advance.
+
+| Check | Result |
+| --- | --- |
+| `cargo test --offline` on the branch | 1433 unit tests passed, 4 ignored; 14 integration tests passed |
+| Three complete recorded takes in a row | Same final layout (compared case-sensitively), final frames SSIM 1.000, no problems in Corral's log |
+| Recording review | One frame per second across the whole of the chosen take: only Corral and sample files |
+| Sample preview with no sample Downloads folder set, then one outside the scratch folder | No Gate is created in either case, and the real Downloads folder is not used |
+| Guard: a sample file opened from Corral on purpose, so its viewer takes the foreground | The run stops at the next step |
+
+The takes caught three mistakes in the demo setup before this result. A press too soon after a
+click opened a sample file in the image viewer. One take typed "pHOTOS", so the script now sends
+characters rather than key presses; the cause was not established, though the inverted case points
+to Caps Lock. Some takes left the new image unfiled, because the sample layout lacked a flag
+that every new layout has, and the one-time pass for layouts from before Round-up counted the image
+as already seen. With the flag set, the Round-up scene worked in 12 of 12 repeat runs. A real first
+start uses a new layout, so this does not apply to it. It could apply when a layout from before
+Round-up first loads, as designed.
+
 ## Demo recording (29 October 2026)
+
+This earlier recording has been replaced by the one above.
 
 Driven by Claude Code with the same guarded driver, on the v0.1.0-alpha `corral.exe` (`72d75fc`),
 in preview mode with sample files and blur off. Every step was rehearsed first and checked with

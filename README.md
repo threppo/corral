@@ -5,9 +5,9 @@
 **Status: alpha.** The features below work and have been tested live on Windows 11, but expect
 rough edges; see [Known issues](#known-issues). Download: [v0.2.1-alpha](https://github.com/threppo/corral/releases/tag/v0.2.1-alpha).
 
-![Demo: drawing and naming a Corral, dragging icons in, browsing a Folder Gate, folding, Settings](assets/screenshots/corral-demo.gif)
+![Demo: a messy desktop sorted in one click, drawing a Corral and dragging icons in, Round-up filing a new photo, browsing a Folder Gate, folding, Clear view](assets/screenshots/corral-demo.gif)
 
-57-second demo with sample files ([MP4](https://github.com/threppo/corral/releases/download/v0.1.0-alpha/corral-demo.mp4), [how it was recorded](docs/showcase/demo-script.md)).
+56-second demo with sample files, in Corral's preview window ([MP4](assets/screenshots/corral-demo.mp4), [how it was recorded and what was set up](docs/showcase/demo-script.md)).
 
 ## Before and after
 
@@ -99,7 +99,7 @@ history is short on purpose.
   what was still open. The [verification record](docs/showcase/verification.md) separates what was
   checked fresh on this code from older results, and what I tested from what the agents tested.
 
-Also here: a [45–60 second demo plan](docs/showcase/demo-script.md) using only sample files.
+Also here: [how the demo was scripted and recorded](docs/showcase/demo-script.md), using only sample files.
 
 ## Requirements
 

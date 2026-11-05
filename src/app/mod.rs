@@ -1392,11 +1392,17 @@ impl App {
     fn load_layout(&mut self, settings_existed: bool) -> Layout {
         let stamp = crate::round_up_time::utc_stamp(crate::round_up_time::Clock::now().now_ms);
         let (mut layout, mut recovery) = layout_startup::load(&self.opts.layout_path, &stamp);
+        let first_run_qa = std::env::var("CORRAL_QA_FIRST_RUN").unwrap_or_default();
+        // `scatter`: ask over a sample layout of placed icons, as a real first start asks over
+        // the icons Explorer has already placed.
+        if first_run_qa == "scatter" && self.opts.mode == Mode::Preview && std::env::var_os("CORRAL_QA_ITEMS_DIR").is_some() {
+            recovery.first_run = first_run::Offer::Pending;
+        }
         recovery.first_run.filter_startup(
             self.settings.disabled,
             settings_existed,
             std::env::var_os("CORRAL_QA_ITEMS_DIR").is_some(),
-            std::env::var("CORRAL_QA_FIRST_RUN").is_ok_and(|v| v == "1"),
+            first_run_qa == "1" || first_run_qa == "scatter",
         );
         self.layout_recovery = recovery;
         for g in &mut layout.groups {g.style.migrate_tint_source(self.settings.color,self.settings.desktop_tint_icons_color);}

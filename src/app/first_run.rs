@@ -186,7 +186,10 @@ fn retain_present<'a>(facts: &mut Vec<ItemFacts>, names: impl Iterator<Item = &'
     facts.retain(|fact| present.contains(&fact.name.to_lowercase()));
 }
 
-fn read_sort_items(shells: Vec<ShellItem>) -> Result<Sorted, String> {
+fn read_sort_items(
+    shells: Vec<ShellItem>,
+    fixed_downloads: Option<Option<String>>,
+) -> Result<Sorted, String> {
     // Match item_facts::ensure_com: Shell links use an STA. No COM interfaces leave this thread.
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
@@ -196,7 +199,7 @@ fn read_sort_items(shells: Vec<ShellItem>) -> Result<Sorted, String> {
         .iter()
         .map(crate::item_facts::first_run_facts_for)
         .collect();
-    let downloads = downloads_folder();
+    let downloads = fixed_downloads.unwrap_or_else(downloads_folder);
     unsafe {
         CoUninitialize();
     }
@@ -451,12 +454,13 @@ impl App {
         self.first_run_result = Some(receiver);
         self.layout_recovery.first_run = Offer::Sorting;
         let window = self.message_window.0 as isize;
+        let fixed_downloads = self.qa_fixed_downloads();
         let spawned = std::thread::Builder::new()
             .name("first-run-sort".into())
             .spawn(move || {
                 // A panic must still report back, or the offer would wait for this thread forever.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    read_sort_items(shells)
+                    read_sort_items(shells, fixed_downloads)
                 }))
                 .unwrap_or_else(|_| Err("shortcut reader stopped unexpectedly".into()));
                 deliver(result, &sender, || {

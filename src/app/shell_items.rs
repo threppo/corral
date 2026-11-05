@@ -172,6 +172,20 @@ impl App {
         })
     }
 
+    /// A preview on sample files never reads the real Downloads folder: `Some` replaces it, with
+    /// `CORRAL_QA_DOWNLOADS_DIR` if that is a folder under the same scratch root, else with no Gate.
+    pub(super) fn qa_fixed_downloads(&self) -> Option<Option<String>> {
+        if self.opts.mode != super::Mode::Preview || std::env::var_os("CORRAL_QA_ITEMS_DIR").is_none() { return None; }
+        Some((|| {
+            self.qa_fixture_folder()?;
+            let path = std::path::PathBuf::from(std::env::var_os("CORRAL_QA_DOWNLOADS_DIR")?).canonicalize().ok()?;
+            let root = std::env::current_dir().ok()?.join("analysis").join("qa").canonicalize().ok()?;
+            if !path.starts_with(root) || !path.is_dir() { return None; }
+            let value = path.to_string_lossy();
+            Some(value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned())
+        })())
+    }
+
     fn enumerate_app_items(&self) -> Vec<shell::ShellItem> {
         match self.qa_fixture_folder() {
             Some(path) => shell::enumerate_folder(path.to_str().unwrap_or_default()).unwrap_or_default(),

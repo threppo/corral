@@ -1,76 +1,62 @@
-# Demo recording plan (45–60 seconds)
+# How the demo was recorded
 
-A short screen recording of Corral's preview window with throwaway sample files. Nothing on the
-real desktop is touched: the preview shows only the scratch folder.
+[corral-demo.mp4](../../assets/screenshots/corral-demo.mp4) (56 seconds, 1264 × 700), also shown as
+a GIF in the README. Recorded on 5 November 2026. No person touched the mouse: Claude Code wrote the
+flow, a script drove it, and it ran in real time, with nothing sped up.
 
-**Recorded on 29 October 2026:** [corral-demo.mp4](https://github.com/threppo/corral/releases/download/v0.1.0-alpha/corral-demo.mp4)
-(57 seconds), also shown as a GIF in the README. Claude Code rehearsed each step and then ran it
-with the guarded test driver, using the v0.1.0-alpha `corral.exe`, and recorded only Corral's own
-windows with ffmpeg. Two things changed from the first draft of this plan:
+## What it shows
 
-- Renaming goes through the Corral menu. The rehearsal showed that clicking the title does not
-  start a rename, although the Welcome page says it does (see Known issues in the README).
-- The Settings window was opened on its own (`corral.exe --settings --settings-path <file>`)
-  instead of from a Corral's menu, so the Personalization page, which shows the real wallpaper,
-  never appears.
-
-## Before recording
-
-1. Build: `cargo build --release` (or use `corral.exe` from the release page).
-2. In the folder you run Corral from, create the scratch area. The preview only accepts a scratch
-   folder inside `analysis\qa` under the current folder:
-
-   ```powershell
-   $demo = "$PWD\analysis\qa\demo"
-   New-Item -ItemType Directory -Force "$demo\items", "$demo\home\Holiday 2026", "$demo\home\Recipes" | Out-Null
-   'Meeting notes','Packing list','Trip plan','Reading list','Budget','To do' | ForEach-Object { Set-Content "$demo\items\$_.txt" 'Sample file' }
-   'Shopping','Plan' | ForEach-Object { Set-Content "$demo\home\$_.txt" 'Sample file' }
-   Set-Content "$demo\home\Recipes\Pancakes.txt" 'Sample file'
-   # One Folder Gate on demo\home, made in advance so no folder picker (showing your own
-   # folders) appears in the recording.
-   $gate = @{ id = 1; title = 'Home folder'; monitor = ''; content = @{ kind = 'portal'; path = "$demo\home" }
-              rect = @{ left = 600; top = 60; right = 1020; bottom = 310 }; style = @{}; swipe_index = 0; all_pages = $false }
-   $layout = @{ version = 1; next_id = 2; groups = @($gate); loose = @{}; seen_initialized = $true }
-   [IO.File]::WriteAllText("$demo\layout.json", ($layout | ConvertTo-Json -Depth 6))
-   # Blur off, so the wallpaper never shows through the Corrals.
-   [IO.File]::WriteAllText("$demo\settings.json", '{ "BackgroundBlurEnabled": false }')
-   ```
-
-3. Start the preview on it:
-
-   ```powershell
-   $env:CORRAL_QA_ITEMS_DIR = "$demo\items"
-   .\corral.exe --preview --layout "$demo\layout.json" --settings-path "$demo\settings.json"
-   ```
-
-4. Make the recording clean: close other windows and turn on Do Not Disturb.
-5. Never drag an icon **out** of the preview window onto Explorer or the real desktop: that is an
-   ordinary Windows move of the sample file.
-6. Record the preview window with the Snipping Tool (Win+Shift+R, then select the window area).
-
-## Shot list
-
-As recorded:
-
-| Time | Action | Caption |
+| Time | What happens | Caption |
 | --- | --- | --- |
-| 0–4 s | Preview with the sample icons loose on the "desktop" and the Home folder Gate. | "Corral: a desktop icon organizer for Windows" |
-| 4–14 s | Drag across empty space, choose **Create Corral here**; open the Corral's menu (☰), choose **Rename Corral**, type "Documents", Enter. | "Draw a Corral, then name it" |
-| 14–28 s | Drag four sample files into it; drag its right edge to make it wider. | "Drag icons in, resize to fit" |
-| 28–35 s | In the Home folder Gate, double-click "Recipes", then click the Up arrow in its title. | "Folder Gates: browse a folder right on the desktop" |
-| 35–41 s | Double-click the Documents title to fold it, then again to unfold. | "Fold a Corral down to its title bar" |
-| 41–52 s | Settings window: Welcome, then Round-up, then Glance. | "Settings: rules for new icons, Glance shortcuts" |
-| 52–57 s | Back on the tidy preview. | `github.com/threppo/corral` |
+| 0–5 s | A scattered desktop and Corral's first-start question. | "A messy desktop. Corral asks before it touches anything." |
+| 5–12 s | **Sort my desktop**: Programs, Files, Folders and a Downloads Gate. | "One click: Programs, Files, Folders and a live Downloads Gate." / "Your files stay exactly where they are. Only the view changes." |
+| 12–21 s | Drawing a Corral on empty space, then naming it from its menu. | "Draw your own Corral anywhere." / "Name it." |
+| 21–29 s | Ctrl-clicking three images and dragging them in. | "Select a few icons and drag them in." |
+| 29–36 s | A new image appears and goes to Photos by a rule. A new file also shows up in the Gate. | "New photo on the desktop? Round-up files it by your rules." |
+| 36–41 s | Opening a folder inside the Gate and going back up. | "A Gate is a real folder, live on your desktop. Browse it right there." |
+| 41–47 s | Folding three Corrals. | "Fold what you don't need down to its title bar." |
+| 47–52 s | Clear view: hiding everything and bringing it back. | "Double-click the desktop and everything hides." / "Double-click again and it's all back." |
+| 52–56 s | End card. | "Corral: a desktop icon organizer for Windows · github.com/threppo/corral" |
 
-If a step does not behave as described, keep it out of the recording and note it as an issue
-rather than re-taking until it works by luck.
+## What was set up in advance
 
-## Optional, desktop mode only
+The features in the video are real, but it is a prepared demo, not a recording of someone's desktop:
 
-Glance (Win+Space brings Corrals above open windows) and Clear view (double-click the desktop to
-hide everything) only make sense on the real desktop. Record them only on a desktop prepared for
-it: sample icons only, no personal files or windows visible.
+- It runs in Corral's **preview window**, with only the inside of the window recorded. All files are
+  one-byte samples in a scratch folder.
+- The scattered layout was written in advance with a fixed seed.
+- The **Round-up rule** ("Images go to Photos") was already in the settings file. The video does
+  not show it being created, and the script creates the new image.
+- In the sample world Corral only watches Gate folders, so the script also adds a file to Downloads,
+  whose change notice makes Corral re-read the sample desktop. On a real desktop the notice comes
+  from the desktop folder itself.
+- The build is v0.2.1 plus two test-only hooks. They let a sample-file preview ask the first-start
+  question over a placed layout and show a sample Downloads folder. They do nothing without their
+  test variables.
+- Captions and the rings marking clicks were added afterwards with ffmpeg, timed from the script's log.
 
-## Afterwards
+## How it was driven
 
-Delete `analysis\qa\demo` and clear the variable (`Remove-Item Env:CORRAL_QA_ITEMS_DIR`).
+Maestro-style tools find controls through the accessibility tree. The first step was to check
+whether that could work here, so `windows-gui-mcp` 0.1.0 was installed in a throwaway environment
+and asked, read-only, to dump Corral's windows:
+
+| Window | What UI Automation sees |
+| --- | --- |
+| Settings | Named controls with stable ids, such as `Navigation.Rules` (53 nodes) |
+| Preview, Corrals and Gates | Blank panes: no names, no ids, nothing inside them |
+
+Corral draws its own Corrals, so there is nothing to select. That tool also has no drag action, and
+its fallback click reads the whole screen and clicks matching text without checking which window it
+belongs to. It was not used to drive anything.
+
+The flow instead goes through Corral's own guarded test driver, using coordinates inside the
+preview. Before every pointer move it checks that the window under the pointer is Corral's. Once
+Corral has had the foreground, any other app taking it stops the run, and so does anything covering
+the recorded area. ffmpeg's `gdigrab` records only that rectangle, and it stops before any other
+window comes back.
+
+## Results
+
+See [Demo recording (5 November 2026)](verification.md#demo-recording-5-november-2026) in the
+verification record.
