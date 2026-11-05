@@ -10,6 +10,7 @@ mod hosting;
 mod input;
 mod item_drag;
 mod layout_startup;
+mod first_run;
 mod metrics;
 mod views;
 mod details;
@@ -17,6 +18,7 @@ mod paint;
 mod pages_glue;
 mod peek;
 mod portals;
+mod preview_desktop;
 mod profiles;
 mod quick_hide_glue;
 mod round_up_glue;
@@ -112,6 +114,7 @@ const SHELL_CHANGE_GAP_MS: u32 = 300;
 const WM_RESTACK: u32 = WM_APP + 0x21;
 /// Startup notice is dispatched only after the desktop and main message loop are ready.
 const WM_LAYOUT_NOTICE: u32 = WM_APP + 0x23;
+const WM_FIRST_RUN: u32 = WM_APP + 0x24;
 
 const HOTKEY_QUIT: i32 = 1;
 const EM_SETSEL: u32 = 0x00B1;
@@ -760,6 +763,7 @@ struct App {
     taskbar_created: u32,
     layout: Layout,
     layout_recovery: layout_startup::Recovery,
+    first_run_result: Option<first_run::Receiver>,
     monitors: Vec<Monitor>,
     display_snapshot: Option<Snapshot>,
     runtime_bodies: HashMap<u64, RuntimeBody>,
@@ -978,6 +982,18 @@ fn dip_to_px_i32(dip: i32, dpi: u32) -> i32 {
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == first_run::WM_SORTED || (msg == WM_TIMER && wparam.0 == first_run::RESULT_TIMER) {
+        first_run::complete(hwnd);
+        return LRESULT(0);
+    }
+    if msg == WM_FIRST_RUN {
+        first_run::dispatch();
+        return LRESULT(0);
+    }
+    if msg == WM_COMMAND && lparam.0 == 0 && wparam.0 == preview_desktop::USE_DESKTOP_ID
+        && preview_desktop::dispatch(hwnd) {
+        return LRESULT(0);
+    }
     if msg == WM_LAYOUT_NOTICE {
         // Release APP before the modal dialog pumps messages, so the desktop keeps responding.
         let notice = APP.with(|cell| cell.borrow_mut().as_mut().and_then(|app|
@@ -1104,6 +1120,9 @@ fn pre_translate(msg: &MSG) -> bool {
 }
 
 pub fn run(opts: Options) -> i32 {
+    // snapshot_init can finish an interrupted restore and write settings before reload_settings.
+    // An unreadable existence check is not evidence of a new user.
+    let settings_existed = !matches!(opts.settings_path.try_exists(), Ok(false));
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
@@ -1119,7 +1138,7 @@ pub fn run(opts: Options) -> i32 {
     for class in [w!("CorralPreview"), w!("CorralSurface"), w!("CorralGroup"), w!("CorralMessage"), w!("CorralGhost"), w!("CorralTaskbarItem")] {
         register_class(instance, class);
     }
-    let app = match App::create(opts, instance) {
+    let app = match App::create(opts, instance, settings_existed) {
         Ok(app) => app,
         Err(message) => {
             eprintln!("corral: {message}");
@@ -1141,6 +1160,11 @@ pub fn run(opts: Options) -> i32 {
             if app.layout_recovery.notice.is_some() {
                 if let Err(e) = unsafe { PostMessageW(app.message_window, WM_LAYOUT_NOTICE, WPARAM(0), LPARAM(0)) } {
                     log(&format!("layout startup: could not post notice: {e}"));
+                }
+            }
+            if app.layout_recovery.first_run == first_run::Offer::Pending {
+                if let Err(e) = unsafe { PostMessageW(app.message_window, WM_FIRST_RUN, WPARAM(0), LPARAM(0)) } {
+                    log(&format!("first run: could not post offer: {e}"));
                 }
             }
         }
@@ -1172,7 +1196,7 @@ pub fn run(opts: Options) -> i32 {
 const HOST_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl App {
-    fn create(opts: Options, instance: HINSTANCE) -> Result<App, String> {
+    fn create(opts: Options, instance: HINSTANCE, settings_existed: bool) -> Result<App, String> {
         let (parent, preview_host, host) = match opts.mode {
             Mode::Preview => {
                 // Preview simulates a 1280x760-DIP monitor at the primary monitor's scale.
@@ -1185,6 +1209,7 @@ impl App {
                         CW_USEDEFAULT, CW_USEDEFAULT, pw, ph, HWND::default(), HMENU::default(), instance, None)
                 }
                 .map_err(|e| format!("preview window: {e}"))?;
+                preview_desktop::attach_menu(hwnd).map_err(|e| format!("preview menu: {e}"))?;
                 crate::app_icon::set_for_dpi(hwnd, unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) });
                 (hwnd, Some(hwnd), None)
             }
@@ -1253,6 +1278,7 @@ impl App {
             // Settings reloads can request a save before load_layout runs. Hold those
             // writes until the startup load has either succeeded or preserved its files.
             layout_recovery: layout_startup::Recovery::pending_load(),
+            first_run_result: None,
             monitors: Vec::new(),
             display_snapshot: None,
             runtime_bodies: HashMap::new(),
@@ -1340,7 +1366,8 @@ impl App {
         app.monitors = app.display_snapshot.as_ref().map(hosting::snapshot_monitors).unwrap_or_default();
         app.icon_px = scale(style::ICON_PX, app.dpi());
         app.reload_settings();
-        app.layout = app.load_layout();
+        app.layout = app.load_layout(settings_existed);
+        app.adopt_preview_groups();
         app.prepare_round_up();
         app.profile_startup(true);
         app.load_items();
@@ -1362,9 +1389,15 @@ impl App {
         Ok(app)
     }
 
-    fn load_layout(&mut self) -> Layout {
+    fn load_layout(&mut self, settings_existed: bool) -> Layout {
         let stamp = crate::round_up_time::utc_stamp(crate::round_up_time::Clock::now().now_ms);
-        let (mut layout, recovery) = layout_startup::load(&self.opts.layout_path, &stamp);
+        let (mut layout, mut recovery) = layout_startup::load(&self.opts.layout_path, &stamp);
+        recovery.first_run.filter_startup(
+            self.settings.disabled,
+            settings_existed,
+            std::env::var_os("CORRAL_QA_ITEMS_DIR").is_some(),
+            std::env::var("CORRAL_QA_FIRST_RUN").is_ok_and(|v| v == "1"),
+        );
         self.layout_recovery = recovery;
         for g in &mut layout.groups {g.style.migrate_tint_source(self.settings.color,self.settings.desktop_tint_icons_color);}
         layout

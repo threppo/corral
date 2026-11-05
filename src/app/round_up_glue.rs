@@ -220,6 +220,8 @@ impl App {
     /// for about two seconds, a changed item while "Keep Round-up active" is on. Called whenever the
     /// desktop's items were read. Items the user placed are never touched.
     pub(super) fn run_rules(&mut self) -> usize {
+        // The first-run choice owns the initial desktop, including while its dialog pumps messages.
+        if self.layout_recovery.first_run.waiting() { return 0; }
         if self.settings.disabled || self.items.is_empty() || !self.settings.round_up.active() {
             return 0;
         }

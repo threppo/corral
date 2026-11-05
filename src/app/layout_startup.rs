@@ -51,6 +51,7 @@ const TEMPORARY_NOTICE: &str = "The layout could not be opened right now. The la
 pub(super) struct Recovery {
     pub saving_disabled: bool,
     pub notice: Option<String>,
+    pub first_run: super::first_run::Offer,
 }
 
 impl Recovery {
@@ -66,6 +67,7 @@ impl Recovery {
         Self {
             saving_disabled: true,
             notice: None,
+            ..Self::default()
         }
     }
 
@@ -76,6 +78,11 @@ impl Recovery {
                 io::ErrorKind::PermissionDenied,
                 "Layout saving is off until a backup is successfully restored or Corral restarts.",
             ));
+        }
+        // Startup and quit autosaves must not answer the first-run question. Anything the user has
+        // arranged is saved as usual, whatever the state of the question.
+        if self.first_run.keeps_question_open(layout) {
+            return Ok(());
         }
         model::save(path, layout)
     }
@@ -188,7 +195,10 @@ fn load_with_retry(
             primary_result.or(backup_result).unwrap(),
             Recovery::default(),
         ),
-        Action::FirstRun => (Layout::new(), Recovery::default()),
+        Action::FirstRun => (Layout::new(), Recovery {
+            first_run: super::first_run::Offer::Pending,
+            ..Recovery::default()
+        }),
         Action::Temporary => {
             super::log(&format!(
                 "layout startup: still unavailable after {attempt} retries; primary: {}; backup: {}; files unchanged; starting empty with saving disabled",
@@ -200,6 +210,7 @@ fn load_with_retry(
                 Recovery {
                     saving_disabled: true,
                     notice: Some(TEMPORARY_NOTICE.into()),
+                    ..Recovery::default()
                 },
             )
         }
@@ -251,6 +262,7 @@ fn load_with_retry(
                 Recovery {
                     saving_disabled,
                     notice: Some(notice),
+                    ..Recovery::default()
                 },
             )
         }
@@ -553,11 +565,14 @@ mod tests {
     #[test]
     fn first_run_has_no_rename_flag_or_notice() {
         let dir = Scratch::new();
-        let (layout, recovery) = dir.start();
+        let (layout, mut recovery) = dir.start();
         assert_eq!(layout, Layout::new());
         assert!(!recovery.saving_disabled);
         assert!(recovery.notice.is_none());
         assert_eq!(dir.entries(), 0);
+        recovery.save(&dir.primary(), &layout).unwrap();
+        assert_eq!(dir.entries(), 0, "an unanswered offer cannot persist an empty layout");
+        recovery.first_run = super::super::first_run::Offer::No;
         recovery.save(&dir.primary(), &layout).unwrap();
         assert!(model::load(&dir.primary()).is_ok());
     }

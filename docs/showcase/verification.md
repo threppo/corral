@@ -21,9 +21,29 @@ Run by Claude Code in this repository, at the commit named.
 | Release asset downloaded back from GitHub | v0.1.0-alpha | SHA-256 identical to the local build |
 | Text scan of every published file for personal paths, names and internal-only markers | `72d75fc` | 0 hits (the scan script lives in the private repository) |
 
+## First-run sort and preview button (5 November 2026)
+
+Run by Claude Code on the code of v0.2.0-alpha, with a debug build unless noted.
+
+| Check | Result |
+| --- | --- |
+| `cargo test --offline` | 1431 unit tests passed, 4 ignored; 14 integration tests passed |
+| First-run dialog on sample files, guarded driver: Sort, Not now, no second question after a restart | as designed; 41 of 41 items accounted for |
+| "Use on my desktop" with Corral already running on the desktop | a notice; nothing started |
+| The whole new-user path on the real desktop, into a throwaway layout, with the owner's OK | 31 of 31 items sorted, the preview closed, Corral started on the desktop, the same files and names afterwards |
+| Independent reviews of both changes | two rounds; the defects found were fixed before merging |
+
+The lead agent read windows and files for these results. It took no pictures of the real desktop.
+Not tested: several monitors on this path, and a machine other than the development PC.
+
 ## Screenshots
 
-All screenshots were taken by Claude Code on 29 October 2026 with a guarded test driver that
+`desktop-messy.png`, `desktop-sorted.png`, `desktop-folded.png`: taken by Claude Code on
+5 November 2026 from a v0.2.0-alpha debug build, using 41 throwaway sample items and the positions
+a real first-run sort gives in the preview. Items were placed from a prepared layout, not by the
+dialog, so the Downloads Gate could show a sample folder.
+
+All other screenshots were taken by Claude Code on 29 October 2026 with a guarded test driver that
 refuses to click or capture anything that is not a Corral window. They use throwaway sample files
 and a scratch settings file, not real desktop items or settings.
 

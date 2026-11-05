@@ -66,6 +66,15 @@ pub fn facts_for(item: &ShellItem) -> ItemFacts {
     collect_with(item, &ReadOnlyFacts)
 }
 
+/// First-run sorting avoids probing UNC shortcut targets. The caller initializes Shell COM.
+pub(crate) fn first_run_facts_for(item: &ShellItem) -> ItemFacts {
+    collect_first_run_with(item, &ReadOnlyFacts)
+}
+
+pub(crate) fn collect_first_run_with(item: &ShellItem, reader: &dyn FactReader) -> ItemFacts {
+    collect(item, reader, true)
+}
+
 /// Facts of every item on the real desktop, for the editor's live caption. Errors are reported
 /// instead of showing a misleading zero.
 pub fn desktop_facts() -> Result<Vec<ItemFacts>, String> {
@@ -90,6 +99,10 @@ fn ensure_com() {
 const PROGRAM_EXTENSIONS: [&str; 5] = ["exe", "bat", "cmd", "dll", "jar"];
 
 pub fn collect_with(item: &ShellItem, reader: &dyn FactReader) -> ItemFacts {
+    collect(item, reader, false)
+}
+
+fn collect(item: &ShellItem, reader: &dyn FactReader, skip_unc_targets: bool) -> ItemFacts {
     let path = item.parsing_name.as_str();
     let system = path.starts_with("::");
     let file_name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_string();
@@ -113,6 +126,7 @@ pub fn collect_with(item: &ShellItem, reader: &dyn FactReader) -> ItemFacts {
     let target = (kind == ItemType::Shortcut)
         .then(|| reader.shortcut_target(path))
         .flatten()
+        .filter(|target| !skip_unc_targets || !target.starts_with(r"\\"))
         .and_then(|target| classify_target(target, reader));
     ItemFacts {
         name: path.to_string(),

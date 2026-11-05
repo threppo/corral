@@ -3,14 +3,29 @@
 **A desktop icon organizer for Windows, built as a personal project with AI coding agents.**
 
 **Status: alpha.** The features below work and have been tested live on Windows 11, but expect
-rough edges; see [Known issues](#known-issues). Download: [v0.1.0-alpha](https://github.com/threppo/corral/releases/tag/v0.1.0-alpha).
+rough edges; see [Known issues](#known-issues). Download: [v0.2.0-alpha](https://github.com/threppo/corral/releases/tag/v0.2.0-alpha).
 
 ![Demo: drawing and naming a Corral, dragging icons in, browsing a Folder Gate, folding, Settings](assets/screenshots/corral-demo.gif)
 
 57-second demo with sample files ([MP4](https://github.com/threppo/corral/releases/download/v0.1.0-alpha/corral-demo.mp4), [how it was recorded](docs/showcase/demo-script.md)).
 
+## Before and after
+
+| | |
+| --- | --- |
+| ![A messy desktop with icons scattered everywhere](assets/screenshots/desktop-messy.png) | ![The same icons sorted into Programs, Files and Folders Corrals, with a Downloads Gate beside them](assets/screenshots/desktop-sorted.png) |
+| Before: icons wherever they landed | After: sorted in one click on first run |
+| ![The same Corrals folded down to their title bars, leaving the wallpaper clear](assets/screenshots/desktop-folded.png) | |
+| Folded: just the title bars, until you need them | |
+
+Sample files on a plain gradient, the same 41 items in all three.
+
+## What's in it
+
 Corral keeps the desktop tidy with a set of building blocks you arrange yourself:
 
+- **Sort on first run**: Corral offers once to put your icons into Programs, Files and Folders
+  Corrals and add a Gate for your Downloads folder. Say no and it stays out of the way.
 - **Corrals**: movable, resizable containers that hold desktop items.
 - **Folder Gates**: a corral that shows a folder and lets you browse it without opening a window.
 - **Views**: every Corral and Gate shows its items as Icons, List or Details (sortable, resizable
@@ -31,7 +46,7 @@ Corral keeps the desktop tidy with a set of building blocks you arrange yourself
 - **Ranges**: separate desktop pages you switch between.
 - **Glance**: bring all corrals above your windows with a hotkey.
 
-Arranging items in corrals and Round-up never move, rename or delete your files; corrals only
+Sorting, arranging items in corrals and Round-up never move, rename or delete your files; corrals only
 reference items on your desktop. Dropping files onto a Folder Gate is an ordinary Windows move
 into that folder.
 
@@ -107,17 +122,25 @@ environment variable, and otherwise uses `cargo` from your `PATH`.
 
 ## Running
 
-`corral.exe` opens in a preview window by default, so you can try it without touching your
-desktop. Start it with `--desktop` to organise the real desktop.
+Download `corral.exe` from the [latest release](https://github.com/threppo/corral/releases/latest)
+and run it. There is nothing to install.
+
+1. It opens in a preview window showing your own desktop items, and your real desktop stays as it
+   is. The first time, it asks whether to sort them.
+2. When you like what you see, click **Use on my desktop** at the top of the preview. Your
+   arrangement comes with you.
+3. To keep it, turn on **Start with Windows** in Settings. You can turn Corral off there too, which
+   gives the desktop icons back to Windows.
+
+From a command line, `corral.exe --desktop` goes straight to the real desktop.
 
 ## Known issues
 
 - With two Folder Gates on the same folder, selecting an item highlights it in both.
-- In the v0.1.0-alpha download, the Welcome page in Settings says to click a Corral's title to
-  rename it, which does not work. Right-click the title and choose **Rename Corral** instead. The
-  tip is corrected in the source.
-- Opening a folder with thousands of files in a Gate for the first time froze the window for
-  a few seconds once in testing. It has not happened again since.
+- The **Use on my desktop** bar at the top of the preview is a plain white Windows menu bar, on an
+  otherwise dark window.
+- Corrals sorted in the preview keep the preview's size on the real desktop, so on a large screen
+  they start out smaller than they need to be. Resize them, or sort on the real desktop instead.
 - The release `corral.exe` is not code-signed, so Windows SmartScreen may warn before the first run.
 
 ## Settings and layouts
