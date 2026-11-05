@@ -122,7 +122,7 @@ environment variable, and otherwise uses `cargo` from your `PATH`.
 
 ## Running
 
-Download `corral.exe` from the [latest release](https://github.com/threppo/corral/releases/latest)
+Download `corral.exe` from the [v0.2.0-alpha release](https://github.com/threppo/corral/releases/tag/v0.2.0-alpha)
 and run it. There is nothing to install.
 
 1. It opens in a preview window showing your own desktop items, and your real desktop stays as it
