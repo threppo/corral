@@ -3935,8 +3935,7 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
             match wparam.0 {
                 status::APPLIED => st.notice.clear(),
                 status::QUEUED_IN_FILE => {
-                    st.notice =
-                        "Engine confirmation unavailable. Appearance change queued in settings.".into()
+                    st.notice = "Saved. Corral will show this as soon as it can.".into()
                 }
                 // colour-state-spec 3.4: the previous colors are back, with a caption.
                 status::FILE_SAVE_FAILED | status::ENGINE_SAVE_FAILED => {

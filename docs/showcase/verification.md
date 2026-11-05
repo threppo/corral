@@ -57,6 +57,26 @@ and a scratch settings file, not real desktop items or settings.
   from the same source as `72d75fc`. The Personalization page was left out because its preview
   shows the real wallpaper.
 
+## Settings demo recording (5 November 2026)
+
+Run by Claude Code as a release build, in preview mode with sample files. [How it was
+recorded](demo-script.md#the-settings-demo), including what was set up in advance.
+
+| Check | Result |
+| --- | --- |
+| `cargo test --offline` on the branch | 1433 unit tests passed, 4 ignored; 14 integration tests passed |
+| Three complete recorded takes in a row | Same final layout (compared case-sensitively), no problems in Corral's log |
+| Final frames of those takes | SSIM 0.95 and 0.96. A difference image shows only the blurred backdrop inside the Corrals, which depends on where the preview window happened to open. The Settings side had no differences |
+| Recording review | One frame per second across the chosen take: only Corral, sample files and the wallpaper |
+| Guard: a sample file opened from a Corral on purpose | The run stops at the next step once the viewer holds the foreground |
+
+Rehearsals found one real bug, fixed in this change. After a slider or color change, Settings gave
+the app only 200 ms to confirm it. An app busy rebuilding the blur missed that, so Settings saved
+through its settings file, which worked, and showed "Engine confirmation unavailable. Appearance
+change queued in settings." A final change now waits up to 1.5 seconds, on a background thread, and
+that notice now reads "Saved. Corral will show this as soon as it can." The new wording itself was
+not seen live, because the notice no longer appeared in the rehearsals.
+
 ## Demo recording (5 November 2026)
 
 Run by Claude Code on v0.2.1 plus two test-only hooks, as a release build, in preview mode with

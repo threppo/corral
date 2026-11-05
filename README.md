@@ -20,6 +20,12 @@ rough edges; see [Known issues](#known-issues). Download: [v0.2.1-alpha](https:/
 
 Sample files on a plain gradient, the same 41 items in all three.
 
+## Make it yours
+
+![Demo: Settings beside live Corrals. Changing color, see-through, blur, outline and titlebars, one Corral's own look and Camouflage, then sorting, Details view, resizing, tabs, folding and Clear view](assets/screenshots/corral-settings-demo.gif)
+
+83-second tour of the settings and what a Corral can do, with every change showing live ([MP4](assets/screenshots/corral-settings-demo.mp4), [how it was recorded](docs/showcase/demo-script.md#the-settings-demo)).
+
 ## What's in it
 
 Corral keeps the desktop tidy with a set of building blocks you arrange yourself:

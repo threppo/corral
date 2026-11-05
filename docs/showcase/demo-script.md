@@ -60,3 +60,35 @@ window comes back.
 
 See [Demo recording (5 November 2026)](verification.md#demo-recording-5-november-2026) in the
 verification record.
+
+## The Settings demo
+
+[corral-settings-demo.mp4](../../assets/screenshots/corral-settings-demo.mp4) (83 seconds, 1660 × 700),
+also shown as a GIF in the README. Recorded on 5 November 2026 in the same way, with Corral's
+preview window narrowed and the Settings window beside it.
+
+| Time | What happens | Caption |
+| --- | --- | --- |
+| 0–6 s | Settings beside the Corrals; choosing colors. | "Settings on the right, your Corrals on the left." / "Pick a color. Corrals change right away." |
+| 6–13 s | See-through and blur sliders. | "See-through lets your wallpaper in." / "Blur softens it, like frosted glass." |
+| 13–24 s | Corners and outline; titlebars that appear on hover. | "Rounded or square, with or without an outline." / "Hide titlebars until you point at a Corral." |
+| 24–38 s | Tinted icons, then a color and Camouflage for one Corral only. | "Tint the icons to match." / "Or give one Corral its own look." / "Camouflage: icons take on the wallpaper's colors." |
+| 38–51 s | Sorting by type, and Details view from the Corral's menu. | "Every Corral has a menu. Sort by name, size, type or date." / "Show it as icons, a list or details." |
+| 51–66 s | Resizing, dropping one Corral on another, switching tabs. | "Drag an edge to resize. Icons reflow to fit." / "Drop one Corral on another to make tabs." / "Click a tab to switch between them." |
+| 66–80 s | Folding and peeking; Clear view. | "Fold a Corral to its title. Point at it to peek." / "Double-click the desktop and everything hides." / "Double-click again and it's all back." |
+| 80–83 s | End card. | "Corral · github.com/threppo/corral" |
+
+What was set up in advance, and what is real here:
+
+- The three Corrals hold one-byte sample files and were placed in advance. There is no Gate.
+- The picture behind the blur and in the Personalization page is the real wallpaper of the PC it
+  was recorded on. The sample Corral on that page, with its made-up files, is part of Corral.
+- The **Camouflage page is not shown**, because its preview is a live view of the real desktop.
+  The switch shown is the one on the Personalization page, for one Corral. The **Round-up page** is
+  also left out, because its captions describe the real desktop's icons.
+- The build is v0.2.1 plus the first demo's test hooks, which this demo doesn't use, and one fix
+  found while rehearsing: see the verification record.
+
+Settings is where UI Automation pays off: its clicks find controls by name, such as
+`Personalization.None.Color.0.control.3`, so they still land when the page scrolls. On the Corral
+side, the flow uses coordinates, as in the first demo.

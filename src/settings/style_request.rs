@@ -278,7 +278,10 @@ impl LiveRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveOutcome { Applied, Rejected, Unavailable, PreviewOnly }
 /// CorralMessage is a hidden top-level popup, not HWND_MESSAGE. Bound the entire discovery/send.
+/// Runs on the settings window's sender thread. A draft frame is best effort; a commit waits longer,
+/// because an engine busy rebuilding the blur is not an unreachable one.
 pub fn send_live(request: &LiveRequest) -> LiveOutcome {
+    let budget_ms: u128 = if request.persist { 1500 } else { 200 };
     use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::Win32::System::DataExchange::COPYDATASTRUCT;
@@ -292,7 +295,7 @@ pub fn send_live(request: &LiveRequest) -> LiveOutcome {
         let Ok(hwnd) = (unsafe { FindWindowExW(HWND::default(), after, w!("CorralMessage"), None) }) else { break };
         if hwnd.is_invalid() { break; }
         after = hwnd;
-        let left = 200u128.saturating_sub(start.elapsed().as_millis());
+        let left = budget_ms.saturating_sub(start.elapsed().as_millis());
         if left == 0 { break; }
         let mut result = 0usize;
         let answered = unsafe { SendMessageTimeoutW(hwnd, WM_COPYDATA, WPARAM(0), LPARAM(&data as *const _ as isize), SMTO_ABORTIFHUNG | SMTO_BLOCK, left as u32, Some(&mut result)) };
