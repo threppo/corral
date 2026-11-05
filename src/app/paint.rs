@@ -629,6 +629,7 @@ impl App {
         }
         let Some(group) = self.layout.groups.iter().find(|g| g.id == self.groups[index].id).cloned() else { return };
         if self.settings.disabled || !tabs::body_visible(&self.layout.groups, &group) || !self.page_group_visible(&group) {
+            if !self.pages.snapshotting { self.painted_list_insertions.remove(&group.id); }
             if !tabs::body_visible(&self.layout.groups, &group) {
                 // Discard old visible pixels too: page animation composites stored surfaces.
                 let _ = self.groups[index].surface.draw(|ctx| { ctx.clear(Rgba::TRANSPARENT); Ok(()) });
@@ -777,13 +778,8 @@ impl App {
 
         // One grid for painting, hit testing, drops and scrolling (grid-snapping-spec 2.1); its content
         // height feeds the scrollbar model (scrollbar-spec 4: fractional runtime offset).
-        let grid = {
-            let flat = self.group_grid(group.id, geo.dpi, full_body, 0);
-            let content = flat.content_px(member_count);
-            let scroll_px = self.scrollbars.get(&group.id).map_or(to_px(group.scroll, geo.dpi), |b|
-                b.offset_px(flat.body.height(), content, flat.m.cell_h_px, geo.dpi));
-            Grid { scroll_px: scroll_px.max(0), ..flat }
-        };
+        let grid = self.group_paint_grid(&group, geo.dpi, full_body, member_count);
+        let insertion = (!geo.rolled).then(|| self.list_insertion_mark(group.id, &grid, member_count)).flatten();
         let scroll_px = grid.scroll_px;
         // the hover row is remembered by name: after a scroll under a still pointer it would mark the wrong row
         let stale_hover = to_dip(scroll_px, geo.dpi) != group.scroll && self.item_hover.as_ref().is_some_and(|(id, _)| *id == group.id);
@@ -811,13 +807,18 @@ impl App {
         if result.is_ok() && tint::blur_enabled() && high_contrast.is_none() {
             // wallpaper-blur-spec 8: the backdrop is the blurred wallpaper picture Windows reports,
             // never a copy of the composed desktop with its icons and windows.
-            if let Ok(mut mask) = Surface::new(w as u32, h as u32) {
-                let drawn = mask.draw(|ctx| {
-                    ctx.clear(Rgba::TRANSPARENT);
-                    group_paint::paint_mask(&mut group_paint::CtxSink(ctx), &paint)
-                });
-                if drawn.is_ok() {
-                    tint::composite_blurred_backdrop(surface.pixels_mut(), mask.pixels(), w as usize, h as usize, origin, fade, 1.0);
+            if self.blur_mask.is_none() {
+                self.blur_mask = Surface::new(w as u32, h as u32).ok();
+            }
+            if let Some(mask) = self.blur_mask.as_mut() {
+                if mask.resize(w as u32, h as u32).is_ok() {
+                    let drawn = mask.draw(|ctx| {
+                        ctx.clear(Rgba::TRANSPARENT);
+                        group_paint::paint_mask(&mut group_paint::CtxSink(ctx), &paint)
+                    });
+                    if drawn.is_ok() {
+                        tint::composite_blurred_backdrop(surface.pixels_mut(), mask.pixels(), w as usize, h as usize, origin, fade, 1.0);
+                    }
                 }
             }
         }
@@ -853,7 +854,7 @@ impl App {
                             self.draw_group_cell_fx(ctx, item, x as f32, y as f32, cell, geo.dpi, group.id, cell_fx.as_ref())?;
                         }
                     }
-                    if let Some(y) = self.list_insertion(group.id, &grid, members.len()) {
+                    if let Some((_, y)) = insertion {
                         let inset = to_px(8, geo.dpi);
                         ctx.fill_rect(RectF::new((body.left + inset) as f32, y as f32 - 1.0,
                             (body.right - inset).max(body.left + inset) as f32, y as f32 + 1.0), style::SELECTION_BORDER)?;
@@ -911,19 +912,24 @@ impl App {
                 result = surface.draw(|ctx| draw_join_overlay(ctx, title, paint.radius(), mark, geo.dpi, high_contrast));
             }
         }
+        let mut insertion_painted = result.is_ok();
         if result.is_ok() && !self.pages.snapshotting && self.page_layer_visible(&group) {
             // quick-hide fade (non-exempt groups); a fully faded group window stays hidden
             let mut qh_alpha = self.qh_group_alpha(group.id);
             // The Corral dragged onto an armed drop zone shows at 70 % (tabs-spec 3.2).
             if self.tab_fade == Some(group.id) { qh_alpha = (u32::from(qh_alpha) * 70 / 100) as u8; }
             if qh_alpha > 0 {
-                let _ = present_layered(hwnd, &surface, self.window_xy((union.left, union.top)), qh_alpha);
+                insertion_painted = present_layered(hwnd, &surface, self.window_xy((union.left, union.top)), qh_alpha).is_ok();
                 if !unsafe { IsWindowVisible(hwnd) }.as_bool() { unsafe { let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW); } }
             } else { unsafe { let _ = ShowWindow(hwnd, SW_HIDE); } }
             // QA hook: CORRAL_QA_DUMP_DIR=<dir> writes each rendered group surface (no screen capture)
             if let (Ok(dir), true) = (std::env::var("CORRAL_QA_DUMP_DIR"), qh_alpha > 0) {
                 let _ = surface.save_png(&std::path::Path::new(&dir).join(format!("group-{}.png", group.id)));
             }
+        }
+        if insertion_painted && !self.pages.snapshotting {
+            if let Some(mark) = insertion { self.painted_list_insertions.insert(group.id, mark); }
+            else { self.painted_list_insertions.remove(&group.id); }
         }
         let glyph = layout.folder.filter(|_| is_portal).unwrap_or_default();
         if glyph != self.groups[index].glyph && glyph.width() > 0 {
@@ -953,6 +959,15 @@ impl App {
         if let Some(g) = self.layout.group_mut(group.id) { g.scroll = to_dip(scroll_px, geo.dpi); }
         if stale_hover { self.item_hover = None; self.hide_item_tip(); }
         if !self.pages.snapshotting { self.sync_scrollbar(&group, &geo, member_count, scroll_px, colorref(look.color), colorref(fx.label), fade, hover); }
+    }
+
+    /// Painting and insertion invalidation must use the same fractional scrollbar offset.
+    pub(super) fn group_paint_grid(&self, group: &model::Group, dpi: u32, full_body: Rect, count: usize) -> Grid {
+        let flat = self.group_grid(group.id, dpi, full_body, 0);
+        let content = flat.content_px(count);
+        let scroll_px = self.scrollbars.get(&group.id).map_or(to_px(group.scroll, dpi), |b|
+            b.offset_px(flat.body.height(), content, flat.m.cell_h_px, dpi));
+        Grid { scroll_px: scroll_px.max(0), ..flat }
     }
 
     /// scrollbar-spec 2: overlay lane entirely inside the body, with no grid reservation.
@@ -1052,9 +1067,9 @@ impl App {
 
     /// Follow a moved parent (preview window) without repainting.
     fn layout_scrollbars(&mut self) {
-        for group in self.layout.groups.clone() {
+        for group in &self.layout.groups {
             if let Some(bar) = self.scrollbars.get(&group.id) {
-                let rect = self.bar_rect(&self.group_geometry(&group), group.id);
+                let rect = self.bar_rect(&self.group_geometry(group), group.id);
                 let (sx, sy) = self.to_screen((rect.left, rect.top));
                 bar.move_to(sx, sy);
             }

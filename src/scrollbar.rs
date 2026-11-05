@@ -52,7 +52,6 @@ impl PixelRect {
 pub struct BarLayout {
     pub track: PixelRect,
     pub thumb: PixelRect,
-    pub lane: i32,
     pub max_offset: f64,
 }
 fn scale(dpi: u32) -> f64 {
@@ -66,19 +65,6 @@ pub fn window_width(dpi: u32, thin: bool) -> i32 {
 }
 fn overflow(view: f64, content: f64) -> bool {
     view > 0.0 && content > view + 0.5
-}
-pub fn needed(content: i32, area: i32) -> bool {
-    overflow(area as f64, content as f64)
-}
-pub fn bar_layout(
-    view: f64,
-    content: f64,
-    offset: f64,
-    dpi: u32,
-    thin: bool,
-    corner: f64,
-) -> Option<BarLayout> {
-    layout_widen(view, content, offset, dpi, thin, corner, 0.0)
 }
 fn layout_widen(
     view: f64,
@@ -125,7 +111,6 @@ fn layout_widen(
             right,
             bottom: top + thumb_len,
         },
-        lane,
         max_offset,
     })
 }
@@ -410,16 +395,6 @@ impl ScrollModel {
         };
         self.set(target, now, if !standard || reduced { 0 } else { 90 })
     }
-    pub fn ensure_visible(&mut self, top: f64, bottom: f64, now: u64) -> bool {
-        let target = if top - 6.0 < self.offset {
-            top - 6.0
-        } else if bottom + 6.0 > self.offset + self.view {
-            bottom + 6.0 - self.view
-        } else {
-            self.offset
-        };
-        self.set(target, now, 0)
-    }
 }
 #[derive(Clone, Copy, Debug)]
 pub struct ThumbDrag {
@@ -494,7 +469,6 @@ pub struct PortalRange {
     pub pos: i32,
     pub min: i32,
 }
-
 
 /// scrollbar-spec 5: sRGB contrast after compositing, with an alpha-preserving recolour guard.
 fn luminance(c: [u8; 3]) -> f64 {
@@ -1403,7 +1377,7 @@ mod tests {
                     let bar = layout_widen(400.0, 1600.0, offset, dpi, thin, 6.0, 1.0).unwrap();
                     let h = px(400.0, dpi);
                     let parent = [-500, -300, -500 + px(320.0, dpi), -300 + h + px(32.0, dpi)];
-                    let origin = (parent[2] - bar.lane, parent[3] - h);
+                    let origin = (parent[2] - window_width(dpi, thin), parent[3] - h);
                     let thumb = PixelRect { left: origin.0 + bar.thumb.left, top: origin.1 + bar.thumb.top,
                         right: origin.0 + bar.thumb.right, bottom: origin.1 + bar.thumb.bottom };
                     let band_left = parent[2] - crate::icon_metrics::dip_to_px(crate::snap::BAND_DIP, dpi);
@@ -1419,7 +1393,7 @@ mod tests {
                             assert!(!hit([true; 2], true, true), "capture keeps input even off the thumb");
                         }
                     }
-                    let rest = bar_layout(400.0, 1600.0, offset, dpi, thin, 6.0).unwrap();
+                    let rest = layout_widen(400.0, 1600.0, offset, dpi, thin, 6.0, 0.).unwrap();
                     let x = thumb.left.max(band_left);
                     assert!(x < origin.0 + rest.thumb.left, "exercise the extra widened hit width");
                     assert!(!in_resize_zone((x, thumb.top), parent, dpi, [true; 2], true, Some(thumb), false),
@@ -1467,22 +1441,22 @@ mod tests {
     // scrollbar-spec 8.1-4
     #[test]
     fn fits_and_degenerate_viewports() {
-        assert!(bar_layout(100.0, 100.5, 0.0, 96, false, 0.0).is_none());
-        assert!(bar_layout(100.0, 101.0, 0.0, 96, false, 0.0).is_some());
-        assert!(bar_layout(0.0, 100.0, 0.0, 96, false, 0.0).is_none());
-        assert!(bar_layout(f64::NAN, 100.0, 0.0, 96, false, 0.0).is_none());
-        let b = bar_layout(1.0, 100.0, 0.0, 96, false, 900.0).unwrap();
+        assert!(layout_widen(100.0, 100.5, 0.0, 96, false, 0.0, 0.).is_none());
+        assert!(layout_widen(100.0, 101.0, 0.0, 96, false, 0.0, 0.).is_some());
+        assert!(layout_widen(0.0, 100.0, 0.0, 96, false, 0.0, 0.).is_none());
+        assert!(layout_widen(f64::NAN, 100.0, 0.0, 96, false, 0.0, 0.).is_none());
+        let b = layout_widen(1.0, 100.0, 0.0, 96, false, 900.0, 0.).unwrap();
         assert_eq!(b.track.height(), 1);
         assert_eq!(b.thumb.height(), 1);
     }
     #[test]
     fn thumb_proportions_and_minimums() {
         for (thin, minimum) in [(false, 28), (true, 20)] {
-            let a = bar_layout(400.0, 40000.0, 0.0, 96, thin, 6.0).unwrap();
+            let a = layout_widen(400.0, 40000.0, 0.0, 96, thin, 6.0, 0.).unwrap();
             assert_eq!(a.thumb.height(), minimum);
-            let a = bar_layout(400.0, 800.0, 0.0, 96, thin, 6.0).unwrap();
+            let a = layout_widen(400.0, 800.0, 0.0, 96, thin, 6.0, 0.).unwrap();
             assert_eq!(a.thumb.height(), a.track.height() / 2);
-            let a = bar_layout(10.0, 10000.0, 0.0, 96, thin, 6.0).unwrap();
+            let a = layout_widen(10.0, 10000.0, 0.0, 96, thin, 6.0, 0.).unwrap();
             assert!(a.thumb.height() <= a.track.height());
         }
     }
@@ -1490,7 +1464,7 @@ mod tests {
     fn endpoints_and_monotone_positions() {
         let mut previous = -1;
         for offset in (0..=600).step_by(10) {
-            let b = bar_layout(300.0, 900.0, offset as f64, 120, false, 8.0).unwrap();
+            let b = layout_widen(300.0, 900.0, offset as f64, 120, false, 8.0, 0.).unwrap();
             assert!(b.thumb.top >= previous);
             previous = b.thumb.top;
             if offset == 0 {
@@ -1508,19 +1482,19 @@ mod tests {
                 for wide in [0.0, 0.37, 1.0] {
                     let b = layout_widen(400.0, 1600.0, 153.4, dpi, thin, 9.0, wide).unwrap();
                     assert!(b.thumb.left >= 0);
-                    assert!(b.thumb.right <= b.lane);
+                    assert!(b.thumb.right <= window_width(dpi, thin));
                     assert!(b.thumb.width() >= 1);
                     assert!(b.thumb.top >= b.track.top);
                     assert!(b.thumb.bottom <= b.track.bottom);
-                    let rest = bar_layout(400.0, 1600.0, 153.4, dpi, thin, 9.0).unwrap();
+                    let rest = layout_widen(400.0, 1600.0, 153.4, dpi, thin, 9.0, 0.).unwrap();
                     assert_eq!(b.thumb.right, rest.thumb.right);
                     assert!(b.thumb.width() >= rest.thumb.width());
                 }
             }
-            let normal = bar_layout(400.0, 1600.0, 0.0, dpi, false, 0.0).unwrap();
-            let thin = bar_layout(400.0, 1600.0, 0.0, dpi, true, 0.0).unwrap();
+            let normal = layout_widen(400.0, 1600.0, 0.0, dpi, false, 0.0, 0.).unwrap();
+            let thin = layout_widen(400.0, 1600.0, 0.0, dpi, true, 0.0, 0.).unwrap();
             assert!(thin.thumb.width() < normal.thumb.width());
-            assert!(thin.lane < normal.lane);
+            assert!(window_width(dpi, true) < window_width(dpi, false));
         }
     }
     // scrollbar-spec 8.5-10
@@ -1578,12 +1552,12 @@ mod tests {
     fn dragging_preserves_grab_and_roundtrips_at_each_dpi() {
         for dpi in [96, 120, 144, 240] {
             for offset in [0.0, 40.3, 500.0, 900.0] {
-                let b = bar_layout(300.0, 1200.0, offset, dpi, false, 6.0).unwrap();
+                let b = layout_widen(300.0, 1200.0, offset, dpi, false, 6.0, 0.).unwrap();
                 let grab = 9.0;
                 let drag = ThumbDrag::begin(b, b.thumb.top as f64 + grab, offset);
                 let mapped = drag.offset(b, b.thumb.top as f64 + grab);
                 close(mapped, offset);
-                let again = bar_layout(300.0, 1200.0, mapped, dpi, false, 6.0).unwrap();
+                let again = layout_widen(300.0, 1200.0, mapped, dpi, false, 6.0, 0.).unwrap();
                 assert!((again.thumb.top - b.thumb.top).abs() <= 1);
                 close(drag.original, offset); // Esc uses this DIP value without re-quantizing.
                 close(drag.offset(b, -10000.0), 0.0);
@@ -1595,7 +1569,7 @@ mod tests {
     fn drag_press_does_not_change_position_and_escape_restores() {
         let mut m = model();
         m.set(300.25, 0, 0);
-        let bar = bar_layout(m.view, m.content, m.offset, 144, false, 6.0).unwrap();
+        let bar = layout_widen(m.view, m.content, m.offset, 144, false, 6.0, 0.).unwrap();
         let drag = ThumbDrag::begin(bar, bar.thumb.top as f64 + 8.0, m.offset);
         close(m.offset, 300.25);
         m.set(drag.offset(bar, bar.thumb.top as f64 + 48.0), 0, 0);
@@ -1611,13 +1585,13 @@ mod tests {
         close(m.target, 256.0);
         m.tick(120);
         close(m.offset, 256.0);
-        let b = bar_layout(m.view, m.content, m.offset, 96, false, 6.0).unwrap();
+        let b = layout_widen(m.view, m.content, m.offset, 96, false, 6.0, 0.).unwrap();
         assert_eq!(page_direction(b, b.thumb.top - 1), Some(false));
         assert_eq!(page_direction(b, b.thumb.bottom), Some(true));
         assert_eq!(page_direction(b, b.thumb.top), None);
         let pointer = b.thumb.top;
         m.page(true, 120, true);
-        let b = bar_layout(m.view, m.content, m.offset, 96, false, 6.0).unwrap();
+        let b = layout_widen(m.view, m.content, m.offset, 96, false, 6.0, 0.).unwrap();
         assert_ne!(page_direction(b, pointer), Some(true));
         m.sync(30.0, 3000.0, 64.0, 120);
         close(m.page_size(), 64.0);
@@ -1638,23 +1612,8 @@ mod tests {
         close(m.offset, 0.0);
     }
     #[test]
-    fn ensure_visible_is_minimal_and_clamped() {
-        let mut m = model();
-        m.set(500.0, 0, 0);
-        assert!(!m.ensure_visible(550.0, 600.0, 0));
-        close(m.offset, 500.0);
-        m.ensure_visible(490.0, 550.0, 0);
-        close(m.offset, 484.0);
-        m.ensure_visible(790.0, 850.0, 0);
-        close(m.offset, 536.0);
-        m.ensure_visible(0.0, 30.0, 0);
-        close(m.offset, 0.0);
-        m.ensure_visible(2990.0, 3000.0, 0);
-        close(m.offset, m.max());
-    }
-    #[test]
     fn paging_repeat_deadlines_stop_at_the_pointer_and_do_not_catch_up() {
-        let bar = bar_layout(320.0, 3000.0, 0.0, 96, false, 6.0).unwrap();
+        let bar = layout_widen(320.0, 3000.0, 0.0, 96, false, 6.0, 0.).unwrap();
         let mut press = TrackPress::begin(200, true, 0);
         // a WM_TIMER a few ms early waits for the deadline instead of ending the hold (live 2026-10-28)
         assert_eq!(press.early(395), Some(5));
@@ -1665,7 +1624,7 @@ mod tests {
         assert!(press.repeat(bar, bar, 460));
         assert!(press.repeat(bar, bar, 5000));
         assert_eq!(press.next, 5060);
-        let at_pointer = bar_layout(320.0, 3000.0, 1800.0, 96, false, 6.0).unwrap();
+        let at_pointer = layout_widen(320.0, 3000.0, 1800.0, 96, false, 6.0, 0.).unwrap();
         assert!(!press.repeat(at_pointer, at_pointer, 5060));
         assert!(!press.repeat(bar, at_pointer, 5060));
     }
@@ -1845,7 +1804,7 @@ mod tests {
             assert_eq!(half >> 24, alpha as u32);
             assert_eq!(full >> 24, alpha as u32);
         }
-        let b = bar_layout(200.0, 800.0, 0.0, 96, false, 6.0).unwrap();
+        let b = layout_widen(200.0, 800.0, 0.0, 96, false, 6.0, 0.).unwrap();
         let mut bytes = vec![0; 14 * 200 * 4];
         paint_pixels(
             &mut bytes,

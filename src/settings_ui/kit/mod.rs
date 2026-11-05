@@ -3,8 +3,6 @@
 pub mod controls;
 pub mod focus;
 pub mod layout;
-pub mod menu;
-pub mod slider;
 pub mod theme;
 
 #[cfg(test)]

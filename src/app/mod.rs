@@ -9,6 +9,7 @@ mod group_menu;
 mod hosting;
 mod input;
 mod item_drag;
+mod layout_startup;
 mod metrics;
 mod views;
 mod details;
@@ -109,6 +110,8 @@ const SHELL_CHANGE_MS: u32 = 60;
 const SHELL_CHANGE_GAP_MS: u32 = 300;
 /// Posted when one of Corral's desktop layers changed z-order; re-establishes the desktop stack.
 const WM_RESTACK: u32 = WM_APP + 0x21;
+/// Startup notice is dispatched only after the desktop and main message loop are ready.
+const WM_LAYOUT_NOTICE: u32 = WM_APP + 0x23;
 
 const HOTKEY_QUIT: i32 = 1;
 const EM_SETSEL: u32 = 0x00B1;
@@ -178,7 +181,7 @@ struct GroupGeometry {
     full_body: Rect,
     title: Rect,
     union: Rect,
-    #[allow(dead_code)]
+
     below: bool,
     rolled: bool,
     metrics: group_paint::Metrics,
@@ -670,8 +673,6 @@ enum Interaction {
     Move,
     /// The Corral really changed size.
     Resize,
-    /// The preview window itself is being moved/sized by the system.
-    PreviewMove,
 }
 
 impl Drag {
@@ -753,10 +754,12 @@ struct App {
     message_window: HWND,
     surface_hwnd: HWND,
     surface: Surface,
+    blur_mask: Option<Surface>,
     host: Option<DesktopHost>,
     watchdog: Option<Child>,
     taskbar_created: u32,
     layout: Layout,
+    layout_recovery: layout_startup::Recovery,
     monitors: Vec<Monitor>,
     display_snapshot: Option<Snapshot>,
     runtime_bodies: HashMap<u64, RuntimeBody>,
@@ -775,6 +778,8 @@ struct App {
     header_press: Option<views::HeaderPress>,
     details_rx: Option<std::sync::mpsc::Receiver<Vec<(String, details::Text)>>>,
     list_drop_mark: Option<(u64, usize)>,
+    /// Last painted List/Details insertion marks (slot and device y), also updated by normal paints.
+    painted_list_insertions: HashMap<u64, (usize, i32)>,
     /// `save` is held back while a tear-off is written through `commit_tab_edit`.
     tab_defer_save: bool,
     /// Armed drop zone feedback: (target Corral, insertion index among its tabs for a set).
@@ -973,6 +978,15 @@ fn dip_to_px_i32(dip: i32, dpi: u32) -> i32 {
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg == WM_LAYOUT_NOTICE {
+        // Release APP before the modal dialog pumps messages, so the desktop keeps responding.
+        let notice = APP.with(|cell| cell.borrow_mut().as_mut().and_then(|app|
+            app.layout_recovery.notice.take().map(|body| (app.preview_host.unwrap_or_default(), body))));
+        if let Some((owner, body)) = notice {
+            crate::dialog::notice(owner, crate::dialog::system_light(), "Corral", &body);
+        }
+        return LRESULT(0);
+    }
     if msg == WM_COPYDATA { return style_glue::receive(hwnd, lparam); }
     if msg == style_glue::WM_APPLY_COLOR { style_glue::dispatch(); return LRESULT(0); }
     style_glue::preview_changed(hwnd, msg, lparam);
@@ -1122,6 +1136,15 @@ pub fn run(opts: Options) -> i32 {
     });
     let mut msg = MSG::default();
     log("run: message loop start");
+    APP.with(|cell| {
+        if let Some(app) = cell.borrow().as_ref() {
+            if app.layout_recovery.notice.is_some() {
+                if let Err(e) = unsafe { PostMessageW(app.message_window, WM_LAYOUT_NOTICE, WPARAM(0), LPARAM(0)) } {
+                    log(&format!("layout startup: could not post notice: {e}"));
+                }
+            }
+        }
+    });
     unsafe {
         while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
             if pre_translate(&msg) {
@@ -1222,10 +1245,14 @@ impl App {
             message_window,
             surface_hwnd,
             surface,
+            blur_mask: None,
             host,
             watchdog,
             taskbar_created,
             layout: Layout::new(),
+            // Settings reloads can request a save before load_layout runs. Hold those
+            // writes until the startup load has either succeeded or preserved its files.
+            layout_recovery: layout_startup::Recovery::pending_load(),
             monitors: Vec::new(),
             display_snapshot: None,
             runtime_bodies: HashMap::new(),
@@ -1243,6 +1270,7 @@ impl App {
             header_press: None,
             details_rx: None,
             list_drop_mark: None,
+            painted_list_insertions: HashMap::new(),
             tab_defer_save: false,
             tab_overlay: None,
             tab_fade: None,
@@ -1334,15 +1362,16 @@ impl App {
         Ok(app)
     }
 
-    fn load_layout(&self) -> Layout {
-        if let Ok(mut layout) = model::load_with_backup(&self.opts.layout_path) {
-            for g in &mut layout.groups {g.style.migrate_tint_source(self.settings.color,self.settings.desktop_tint_icons_color);}
-            return layout;
-        }
-        Layout::new()
+    fn load_layout(&mut self) -> Layout {
+        let stamp = crate::round_up_time::utc_stamp(crate::round_up_time::Clock::now().now_ms);
+        let (mut layout, recovery) = layout_startup::load(&self.opts.layout_path, &stamp);
+        self.layout_recovery = recovery;
+        for g in &mut layout.groups {g.style.migrate_tint_source(self.settings.color,self.settings.desktop_tint_icons_color);}
+        layout
     }
 
     fn save(&self) {
+        if self.layout_recovery.saving_disabled { return; }
         // desk-setups-spec 3.2: publish a user gesture once after its quiet period.
         // this deferral can lose one edit if the process dies inside the 500 ms quiet period.
         if crate::desk_setup::defers_save(self.layout.desk_setups.runtime.edit_pending, self.profile_pending.is_some(), self.profiles_enabled()) { return; }
@@ -1353,7 +1382,7 @@ impl App {
         // `layout_to_save` never contains an unfinished colour draft.
         let mut layout = self.layout_to_save().into_owned();
         for g in &mut layout.groups {g.style.migrate_tint_source(self.settings.color,self.settings.desktop_tint_icons_color);}
-        if let Err(e) = model::save(&self.opts.layout_path, &layout) {
+        if let Err(e) = self.layout_recovery.save(&self.opts.layout_path, &layout) {
             eprintln!("corral: save failed: {e}");
         }
     }
@@ -1601,6 +1630,9 @@ impl App {
     }
 
     fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+        if matches!(msg, WM_SETTINGCHANGE | WM_THEMECHANGED | WM_FONTCHANGE) {
+            crate::render::clear_text_measurements();
+        }
         self.check_gate_new_rename(msg);
         if matches!(msg, WM_KILLFOCUS | WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_ENTERMENULOOP | WM_CANCELMODE) {
             self.type_ahead.clear();
@@ -1871,7 +1903,7 @@ impl App {
                     self.consume_style_request(false);
                     if !self.settings.swipe_enabled { self.page_cancel_motion(); }
                     self.page_refresh();
-                } else if self.refresh_icon_metrics() {
+                } else if self.refresh_icon_metrics_on_timer() {
                     // Explorer icon-size changes need not change our JSON settings.
                     self.load_items();
                     self.refresh_all();
@@ -2216,11 +2248,11 @@ mod dpi_wiring_tests {
         let min = |dpi: u32| (to_px(crate::snap::MIN_BODY_DIP.0, dpi), to_px(crate::snap::MIN_BODY_DIP.1, dpi));
         let step = |l: &mut Layout, states: &mut HashMap<u64, RuntimeBody>, gov: &mut String, x: i32| {
             let g = dpi_transition::govern(&live, gov, |m| {
-                let b = dpi_transition::move_layout(grab, (x, 400), m.dpi)?.physical();
+                let b = dpi_transition::move_layout_fitted(grab, (x, 400), m, size)?.physical();
                 Some(metrics::effective_body(b, min(m.dpi)))
             }).unwrap().device.clone();
-            let d = live.find(&g).unwrap().dpi;
-            let req = dpi_transition::move_layout(grab, (x, 400), d).unwrap();
+            let d = live.find(&g).unwrap();
+            let req = dpi_transition::move_layout_fitted(grab, (x, 400), d, size).unwrap();
             let (p, _) = body_placement(req, &live, Some(&g), Some(size), |dpi| min(dpi)).unwrap();
             store_body_placement(l, states, id, p);
             *gov = g;

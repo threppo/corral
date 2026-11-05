@@ -3,7 +3,6 @@
 //! ordinal (days since 0001-01-01). No clock, default path or app state is consulted.
 //! Daily payloads and rotation metadata share one atomic publication, avoiding a two-file commit.
 //! One writer at a time: callers must serialize store mutations (including across processes).
-#![allow(dead_code)]
 
 use crate::{
     model::{LAYOUT_VERSION, Layout},

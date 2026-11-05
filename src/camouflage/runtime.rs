@@ -375,6 +375,10 @@ pub fn cached_pixels(original: &[u8], fx: Effects) -> Vec<u8> {
         apply_duotone(&p, 100, &mut d);
         bytes_of(&d)
     }));
+    if s == 100 {
+        debug_assert_eq!(original.len(), full.len());
+        return full.as_ref().clone();
+    }
     let mut out = vec![0; original.len()];
     lerp_bytes(original, &full, s, &mut out);
     out
@@ -454,6 +458,24 @@ mod tests {
         cache.drop_palette(1);
         assert!(cache.bytes < before && cache.map.keys().all(|k| k.1 != 1));
         assert_eq!(cache.bytes, cache.map.values().map(|v| v.len()).sum::<usize>());
+    }
+
+    #[test]
+    fn full_strength_cached_pixels_match_interpolation_including_alpha() {
+        let p = Rc::new(derive_tint_palette([90, 140, 180]));
+        PALETTES.with(|registry| registry.borrow_mut().insert(&p));
+        let original: Vec<u8> = [0u8, 1, 64, 128, 254, 255].into_iter()
+            .flat_map(|a| [a / 3, a / 2, a, a]).collect();
+        let mut full = words(&original);
+        apply_duotone(&p, 100, &mut full);
+        let full = bytes_of(&full);
+        for icons in [1.0, 0.999, 0.5] {
+            let mut expected = vec![0; original.len()];
+            lerp_bytes(&original, &full, percent(icons), &mut expected);
+            let fx = Effects { icons, palette: p.hash, ..Default::default() };
+            assert_eq!(cached_pixels(&original, fx), expected);
+            assert_eq!(cached_pixels(&original, fx), expected, "cache hit");
+        }
     }
 
     #[test]

@@ -181,18 +181,6 @@ fn text(
     }
     Ok(())
 }
-fn draw(
-    ctx: &render::Ctx,
-    s: &Spec,
-    l: &Layout,
-    selected: usize,
-    focus: Option<usize>,
-    hover: Option<usize>,
-    theme: &Theme,
-    dpi: u32,
-) -> Result<()> {
-    draw_view(ctx, s, l, selected, focus, hover, theme, dpi, l.height, 0.)
-}
 fn draw_view(
     ctx: &render::Ctx,
     s: &Spec,
@@ -684,7 +672,7 @@ mod tests {
                         (l.height * scale).round() as u32,
                     )?;
                     surface
-                        .draw(|ctx| draw(ctx, &s, &l, 0, None, None, &Theme::new(light), dpi))?;
+                        .draw(|ctx| draw_view(ctx, &s, &l, 0, None, None, &Theme::new(light), dpi, l.height, 0.))?;
                     surface.save_png(&dir.join(format!(
                         "reset-{n}-{}-{dpi}.png",
                         if light { "light" } else { "dark" }

@@ -16,8 +16,6 @@ pub mod page;
 
 /// Shared tint colour used until the user picks one (amber).
 pub const TINT_COLOR_DEFAULT: u32 = 0x00E4_913F;
-/// `TransparencyFactor` is an integer scale, not a percent (spec 2.1; brief: keep the stored scale).
-pub const SEE_THROUGH_DEFAULT: u32 = 1380;
 /// Largest value any reader accepts on the wire or from a file.
 pub const SEE_THROUGH_WIRE_MAX: u32 = 2550;
 
@@ -380,11 +378,6 @@ pub fn reset_all(layout: &mut Layout, s: &mut Settings) {
     for group in &mut layout.groups {
         reset_group(&mut group.style);
     }
-}
-
-/// True when any Corral holds an own value (decides whether the Reset dialog offers a choice).
-pub fn any_own_look(layout: &Layout) -> bool {
-    layout.groups.iter().any(|g| has_own_look(&g.style))
 }
 
 // ---------------------------------------------------------------------------------------------

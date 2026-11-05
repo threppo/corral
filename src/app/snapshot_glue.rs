@@ -574,7 +574,7 @@ impl App {
             finish_restore(store, &target, (&layout, &settings), (&self.opts.layout_path, &self.opts.settings_path), restore_to_disk)
         };
         match finish {
-            Finish::Done => {}
+            Finish::Done => self.layout_recovery.after_restore(&finish),
             Finish::RolledBack(e) => {
                 // The journal is gone and the old pair is back on disk: autosave may run again.
                 self.snap.journal.set(JournalState::Clear);

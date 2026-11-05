@@ -15,7 +15,7 @@ pub enum Input {
     AppBack,
     AppForward,
     /// A wheel is never claimed (Alt+wheel belongs to Range switching); listed so the rule is tested.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     Wheel { alt: bool },
 }
 

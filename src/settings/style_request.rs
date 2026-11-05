@@ -53,9 +53,6 @@ pub struct ColorPatch {
     pub text_color_auto: Option<bool>,
 }
 impl ColorPatch {
-    pub fn is_empty(&self) -> bool {
-        self == &Self::default()
-    }
     pub fn merge(&mut self, newer: &Self) {
         macro_rules! merge { ($($f:ident),*) => { $(if newer.$f.is_some() { self.$f = newer.$f.clone(); })* }; }
         merge!(color, transparency_factor, blend_icons, blend_background, tint_icons, tint_icons_color, tint_icons_color_source, text_color, text_color_auto);
@@ -277,15 +274,6 @@ impl LiveRequest {
         value.validate()?;
         Ok(value)
     }
-}
-/// Pure destination policy apart from read-only path normalization. The receiver never opens
-/// the sender's layout; the running engine's in-memory IDs are authoritative.
-pub fn live_guard(request: &LiveRequest, engine_path: &Path, layout: &Layout, isolated: bool, _busy: bool) -> Result<(), &'static str> {
-    request.validate()?;
-    if !same_layout(&request.layout_path, engine_path) { return Err("layout path mismatch"); }
-    if isolated { return Err("preview/real-settings isolation"); }
-    if request.target.is_some_and(|id| !layout.groups.iter().any(|g| g.id == id)) { return Err("missing Corral target"); }
-    Ok(())
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveOutcome { Applied, Rejected, Unavailable, PreviewOnly }
@@ -562,7 +550,7 @@ mod tests {
         let mut merged = ColorPatch { color: Some(1), ..Default::default() };
         merged.merge(&new);
         assert_eq!((merged.color, merged.text_color), (Some(1), Some(9)));
-        assert!(ColorPatch::default().is_empty() && !merged.is_empty());
+        assert_ne!(merged, ColorPatch::default());
     }
 
     #[test]
@@ -632,17 +620,6 @@ mod tests {
         bad = r.clone(); bad.patch.transparency_factor = Some(SEE_THROUGH_WIRE_MAX + 1); assert!(bad.encode().is_none());
         bad = r.clone(); bad.persist = true; bad.cancel = true; assert!(bad.encode().is_none());
         bad = r; bad.layout_path = PathBuf::new(); assert!(bad.encode().is_none());
-    }
-    #[test]
-    fn destination_rejects_other_layout_preview_and_deleted_target() {
-        let mut r = request(); let layout = Layout::new();
-        let path = r.layout_path.clone(); r.target = None;
-        assert!(live_guard(&r, &path, &layout, false, false).is_ok());
-        assert!(live_guard(&r, Path::new("QA/other.json"), &layout, false, false).is_err());
-        assert!(live_guard(&r, &path, &layout, true, false).is_err());
-        assert!(live_guard(&r, &path, &layout, false, true).is_ok());
-        r.target = Some(991);
-        assert!(live_guard(&r, &path, &layout, false, false).is_err());
     }
     #[test]
     fn menu_maps_stable_ids_not_indices_and_cancel() {

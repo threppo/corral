@@ -357,7 +357,7 @@ mod tests {
                         .filter(|r| grid(r.row.kind))
                         .collect();
                     assert_eq!(rows.len(), if page == Page::Welcome { 10 } else { 4 });
-                    let targets = focus_targets(&s, page, dpi, w, h, 0)?;
+                    let targets = focus_targets_with(&s, &[], page, dpi, w, h, 0)?;
                     if page == Page::Tabs {
                         let mut position = 0;
                         for (key, expect) in [
@@ -422,14 +422,14 @@ mod tests {
         let mut s = settings();
         let row = content(Page::Pages).sections[2].rows[0];
         for value in [0, 1, 2, 1, 0, 2] {
-            assert!(row.apply_value(&mut s, value));
+            assert!(content::apply_animation(&mut s, value));
             assert_eq!(row.current_value(&s), value);
             assert_eq!(s.swipe_animation_style, value as u32);
             assert_eq!(s.is_on(Field::SwipeAnimate), value > 0);
             assert_eq!(s.is_on(Field::SwipeBounce), value == 2);
         }
         let before = s.clone();
-        assert!(!row.apply_value(&mut s, 3));
+        assert!(!content::apply_animation(&mut s, 3));
         assert_eq!(before, s);
         for hit in [Hit::AnimationMode(0), Hit::Radio(Field::QuickHideWhat, 0)] {
             apply_segment(&mut s, hit, 0);
@@ -480,27 +480,27 @@ mod tests {
         let mut s = Settings::default();
         let row = content(Page::Hide).sections[2].rows[0];
         for delay in [1, 1000, 30000, 120000, 600000] {
-            assert!(row.apply_value(&mut s, delay));
+            assert!(content::apply_idle_mode(&mut s, delay));
             assert_eq!(row.current_value(&s), delay);
             assert!(s.is_on(Field::AutoShow));
-            assert!(row.apply_value(&mut s, 0));
+            assert!(content::apply_idle_mode(&mut s, 0));
             assert_eq!(row.current_value(&s), 0);
             assert!(!s.is_on(Field::AutoHideIdle));
             assert_eq!(
                 s.quick_hide_auto_hide_on_idle, 0,
                 "existing schema encodes Never as zero"
             );
-            assert!(row.apply_value(&mut s, delay));
+            assert!(content::apply_idle_mode(&mut s, delay));
             assert_eq!(row.current_value(&s), delay);
         }
         s.set(Field::AutoShow, 0);
-        assert!(row.apply_value(&mut s, 1000));
+        assert!(content::apply_idle_mode(&mut s, 1000));
         assert!(
             !s.is_on(Field::AutoShow),
             "changing an active delay must not re-enable AutoShow"
         );
         let before = s.clone();
-        assert!(!row.apply_value(&mut s, 123));
+        assert!(!content::apply_idle_mode(&mut s, 123));
         assert_eq!(before, s);
         for (raw, shown) in [
             (0, 0),
@@ -521,7 +521,7 @@ mod tests {
             let (w, h) = (sc(760.0, dpi), sc(520.0, dpi));
             for page in PAGES {
                 let lay = layout_page(page, &s, dpi, w as f32, h as f32, 0)?;
-                let targets = focus_targets(&s, page, dpi, w, h, 0)?;
+                let targets = focus_targets_with(&s, &[], page, dpi, w, h, 0)?;
                 for section in &lay.sections {
                     for row in &section.rows {
                         assert!(
@@ -550,7 +550,7 @@ mod tests {
                             Hit::Nav(nav)
                         );
                     }
-                    assert_eq!(focus_targets(&s, page, dpi, w, h, scroll)?[0], targets[0]);
+                    assert_eq!(focus_targets_with(&s, &[], page, dpi, w, h, scroll)?[0], targets[0]);
                 }
                 let before = layout_page(page, &s, dpi, w as f32, h as f32, sc(48.0, dpi))?;
                 if let Some(row) = before
@@ -614,7 +614,7 @@ mod tests {
         Ok(())
     }
     #[test]
-    fn u2_layout_bindings_gates_and_dropdown_popup_dimensions() -> Result<()> {
+    fn u2_layout_bindings_gates_and_dropdown_dimensions() -> Result<()> {
         let s = settings();
         let layout = content(Page::Layout);
         assert_eq!(layout.sections[0].gates, &[Gate::LayoutAuto]);
@@ -658,21 +658,6 @@ mod tests {
                             "dropdown clips {label} at {dpi}"
                         );
                     }
-                    for popup_dpi in [96, 120, 144, 240] {
-                        let geometry = kit::menu::PopupGeometry::new(
-                            RectF::new(1800.0, 400.0, 1900.0, 440.0),
-                            RectF::new(0.0, 0.0, 3840.0, 2160.0),
-                            popup_dpi,
-                            220.0,
-                            choices.len(),
-                        );
-                        assert_eq!(geometry.dpi, popup_dpi);
-                        assert_eq!(geometry.surface_size().0, sc(220.0, popup_dpi) as u32);
-                        assert_eq!(
-                            geometry.row(0).bottom - geometry.row(0).top,
-                            scf(32.0, popup_dpi)
-                        );
-                    }
                 }
             }
         }
@@ -694,20 +679,14 @@ mod tests {
             for dpi in [96, 120, 144, 240] {
                 for page in PAGES {
                     let full_h =
-                        content_height(&s, page, dpi, sc(1000.0, dpi), sc(720.0, dpi))? as u32;
+                        content_height_with(&s, &[], page, dpi, sc(1000.0, dpi), sc(720.0, dpi))? as u32;
                     let mut full =
                         Surface::new(sc(1000.0, dpi) as u32, full_h.max(sc(720.0, dpi) as u32))?;
-                    render_settings_state(
-                        &mut full,
-                        &View {
+                    render_settings_editor(&mut full, &View {
                             page,
                             hover: None,
                             scroll: 0,
-                        },
-                        &s,
-                        &theme,
-                        dpi,
-                    )?;
+                        }, &s, &[], &theme, dpi, None)?;
                     full.save_png(
                         &dir.join(format!("{name}-{dpi}-{page:?}-full.png").to_lowercase()),
                     )?;
@@ -726,19 +705,13 @@ mod tests {
                         Page::Layout => state.set(Field::SnapEnabled, 0),
                         _ => {}
                     }
-                    let scroll = max_scroll(&state, page, dpi, sc(760.0, dpi), sc(520.0, dpi))?;
+                    let scroll = Ok::<i32, windows::core::Error>(scroll_with_bottom_padding(content_height_with(&state, &[], page, dpi, sc(760.0, dpi), sc(520.0, dpi))?, sc(520.0, dpi), 0))?;
                     let mut surface = Surface::new(sc(760.0, dpi) as u32, sc(520.0, dpi) as u32)?;
-                    render_settings_state(
-                        &mut surface,
-                        &View {
+                    render_settings_editor(&mut surface, &View {
                             page,
                             hover: None,
                             scroll,
-                        },
-                        &state,
-                        &theme,
-                        dpi,
-                    )?;
+                        }, &state, &[], &theme, dpi, None)?;
                     surface.save_png(
                         &dir.join(format!("{name}-{dpi}-{page:?}-state.png").to_lowercase()),
                     )?;
@@ -746,20 +719,14 @@ mod tests {
                         [(1000.0, 720.0, "default"), (760.0, 520.0, "minimum")]
                     {
                         let (w, h) = (sc(width, dpi), sc(height, dpi));
-                        let max = max_scroll(&s, page, dpi, w, h)?;
+                        let max = Ok::<i32, windows::core::Error>(scroll_with_bottom_padding(content_height_with(&s, &[], page, dpi, w, h)?, h, 0))?;
                         for (position, scroll) in [("top", 0), ("bottom", max)] {
                             let mut surface = Surface::new(w as u32, h as u32)?;
-                            render_settings_state(
-                                &mut surface,
-                                &View {
+                            render_settings_editor(&mut surface, &View {
                                     page,
                                     hover: None,
                                     scroll,
-                                },
-                                &s,
-                                &theme,
-                                dpi,
-                            )?;
+                                }, &s, &[], &theme, dpi, None)?;
                             surface.save_png(
                                 &dir.join(
                                     format!("{name}-{dpi}-{page:?}-{suffix}-{position}.png")

@@ -73,9 +73,6 @@ pub struct Built {
     pub s: Option<Arc<Level>>,
     /// The unblurred copy at `SHARP_K` (same as `s` when the plan's k is `SHARP_K`).
     pub sharp: Option<Arc<Level>>,
-    /// Decodes that ran for this call (the cache tests count them).
-    #[allow(dead_code)]
-    pub decodes: u32,
     /// A read failed just now and was not cached: ask for another pass soon.
     pub retry: bool,
 }
@@ -88,18 +85,17 @@ fn canvas_size(c: [i32; 4]) -> (i32, i32) {
 pub enum Outcome {
     /// A level to cache under the key: the decoded picture, or a flat colour for a picture that can
     /// never be shown (empty or over the size limit), which is as stable as the file itself.
-    Level(Arc<Level>, bool),
+    Level(Arc<Level>),
     /// The file could not be read or decoded just now (locked, half-written). Never cached under the
     /// file's key, so the next pass tries again.
     Transient(String),
 }
 
-/// Build the working image S for `key` from its source (wallpaper-blur-spec 3.1 step 3). Returns the
-/// outcome and whether a decode ran.
+/// Build the working image S for `key` from its source (wallpaper-blur-spec 3.1 step 3).
 pub fn build_s(dec: &dyn Decoder, key: &SKey) -> Outcome {
     let k = key.k;
     let path = match &key.source {
-        SourceId::Solid(c) => return Outcome::Level(Arc::new(Level::solid(*c, k)), false),
+        SourceId::Solid(c) => return Outcome::Level(Arc::new(Level::solid(*c, k))),
         SourceId::File { path, .. } => path,
     };
     let (iw, ih) = match dec.dimensions(path) {
@@ -107,7 +103,7 @@ pub fn build_s(dec: &dyn Decoder, key: &SKey) -> Outcome {
         Err(e) => return Outcome::Transient(e),
     };
     if iw == 0 || ih == 0 || exceeds_limit(iw, ih) {
-        return Outcome::Level(Arc::new(Level::solid(key.background, k)), false);
+        return Outcome::Level(Arc::new(Level::solid(key.background, k)));
     }
     let (cw, ch) = canvas_size(key.canvas);
     let canvas = RectF64::new(key.canvas[0] as f64, key.canvas[1] as f64, cw as f64, ch as f64);
@@ -125,7 +121,7 @@ pub fn build_s(dec: &dyn Decoder, key: &SKey) -> Outcome {
     let scaled = Scaled { w: sw as usize, h: sh as usize, bgra: pixels, region: plan.region };
     let size = mapping::working_size(cw, ch, k);
     let bgrx = compose_working(&p, (iw, ih), &scaled, key.background, (cw, ch), k, size);
-    Outcome::Level(Arc::new(Level::new(size.0, size.1, k, bgrx, None)), true)
+    Outcome::Level(Arc::new(Level::new(size.0, size.1, k, bgrx, None)))
 }
 
 /// Blur S into B. A flat colour blurs to itself (wallpaper-blur-spec 3.1).
@@ -145,17 +141,15 @@ pub fn build_monitor(
     dec: &dyn Decoder,
     failures: &mut dyn FnMut(&SourceId, &str),
 ) -> Built {
-    let mut decodes = 0;
     let mut retry = false;
-    let mut fetch = |slot: &mut Option<(SKey, Arc<Level>)>, key: SKey, decodes: &mut u32, retry: &mut bool| -> (Arc<Level>, bool) {
+    let mut fetch = |slot: &mut Option<(SKey, Arc<Level>)>, key: SKey, retry: &mut bool| -> (Arc<Level>, bool) {
         if let Some((k, level)) = slot.as_ref() {
             if *k == key {
                 return (level.clone(), false);
             }
         }
         match build_s(dec, &key) {
-            Outcome::Level(level, decoded) => {
-                *decodes += decoded as u32;
+            Outcome::Level(level) => {
                 *slot = Some((key, level.clone()));
                 (level, false)
             }
@@ -174,7 +168,7 @@ pub fn build_monitor(
     let primary_k = plan.map_or(mapping::SHARP_K, |p| p.k);
     let need_primary = plan.is_some() || input.want_sharp;
 
-    let (s, s_failed) = match need_primary.then(|| fetch(&mut cache.s, input.s_key(primary_k), &mut decodes, &mut retry)) {
+    let (s, s_failed) = match need_primary.then(|| fetch(&mut cache.s, input.s_key(primary_k), &mut retry)) {
         Some((level, failed)) => (Some(level), failed),
         None => {
             cache.s = None;
@@ -213,10 +207,10 @@ pub fn build_monitor(
         cache.sharp = None;
         s.clone()
     } else {
-        Some(fetch(&mut cache.sharp, input.s_key(mapping::SHARP_K), &mut decodes, &mut retry).0)
+        Some(fetch(&mut cache.sharp, input.s_key(mapping::SHARP_K), &mut retry).0)
     };
 
-    Built { blurred, s, sharp, decodes, retry }
+    Built { blurred, s, sharp, retry }
 }
 
 #[cfg(test)]
@@ -289,7 +283,7 @@ pub mod tests {
     fn each_trigger_changes_the_right_key() {
         let base = input();
         let k = base.s_key(8);
-        let mut changed = |f: &dyn Fn(&mut MonitorInput)| {
+        let changed = |f: &dyn Fn(&mut MonitorInput)| {
             let mut i = base.clone();
             f(&mut i);
             i.s_key(8) != k
@@ -319,11 +313,9 @@ pub mod tests {
         let mut i = input();
         i.radius = 60.0; // Medium: k 8
         let first = run(&mut cache, &i, &dec);
-        assert_eq!(first.decodes, 1);
         assert_eq!(dec.decodes.get(), 1);
         i.radius = 120.0; // Strong: k 8 as well, different sigma_w
         let second = run(&mut cache, &i, &dec);
-        assert_eq!(second.decodes, 0, "same k: no decode");
         assert_eq!(dec.decodes.get(), 1);
         assert!(Arc::ptr_eq(first.s.as_ref().unwrap(), second.s.as_ref().unwrap()), "S reused");
         assert!(!Arc::ptr_eq(first.blurred.as_ref().unwrap(), second.blurred.as_ref().unwrap()), "B rebuilt");
@@ -334,7 +326,6 @@ pub mod tests {
         // A k change decodes again (Soft is k 4 at 96 dpi).
         i.radius = 30.0;
         let fourth = run(&mut cache, &i, &dec);
-        assert_eq!(fourth.decodes, 1);
         assert_eq!(fourth.s.as_ref().unwrap().k, 4);
     }
 

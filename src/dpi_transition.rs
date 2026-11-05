@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+
 //! Pure transition decisions; no windows, persistence, timers or file operations.
 //!
 //! Identity uses the body top-left; effective DPI uses the
@@ -225,34 +225,6 @@ pub struct PlacementDecision {
     pub effective_dpi: u32,
 }
 
-/// Call after physical move/resize/snap. Supply the full
-/// expanded effective body separately (including minimum expansion, never the
-/// rolled envelope); its centre selects metrics DPI but not stored monitor.
-/// On a DPI-only notification call again with unchanged requested geometry.
-pub fn place(
-    requested: RequestedBody,
-    effective_body: Rect,
-    live: &Snapshot,
-) -> Option<PlacementDecision> {
-    if !valid_rect(effective_body, false) {
-        return None;
-    }
-    let r = requested.physical();
-    let identity = live.nearest((r.left, r.top))?;
-    let centre = (
-        effective_body.left + effective_body.width() / 2,
-        effective_body.top + effective_body.height() / 2,
-    );
-    let dpi = live.nearest(centre)?;
-    Some(PlacementDecision {
-        monitor: identity.device.clone(),
-        rect_dip: physical_to_dips(r, identity)?,
-        requested,
-        centre_monitor: dpi.device.clone(),
-        effective_dpi: dpi.dpi,
-    })
-}
-
 /// DIP-sized placement rect: top-left from the physical rect, size either the
 /// explicit DIP size or the independently rounded physical edges.
 fn grid_rect(r: Rect, d: &DisplaySnapshot, size_dip: Option<(i32, i32)>) -> Option<Rect> {
@@ -400,16 +372,6 @@ impl Grab {
     }
 }
 
-/// Physical body of a title drag when the cursor is at `cursor` and the Corral is
-/// laid out at `dpi`: DIP size scaled, grab point under the cursor.
-pub fn move_layout(grab: Grab, cursor: (i32, i32), dpi: u32) -> Option<RequestedBody> {
-    let (w, h) = scale_size(grab.size_dip, dpi)?;
-    let (gx, gy) = grab.at(dpi)?;
-    let left = cursor.0.checked_sub(gx)?;
-    let top = cursor.1.checked_sub(gy)?;
-    RequestedBody::from_physical(Rect::new(left, top, left.checked_add(w)?, top.checked_add(h)?))
-}
-
 /// Corral choice: Which monitor's DPI governs a Corral while it is
 /// dragged. `probe(m)` returns the effective body as it would be laid out at
 /// `m`'s DPI (the caller keeps the grab point/anchor edge fixed). A layout is
@@ -543,63 +505,6 @@ pub fn clamp_title(
     ))
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RecoveryKind {
-    Nearest,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Recovery {
-    pub kind: RecoveryKind,
-    pub mapped_monitor: String,
-    pub placement: PlacementDecision,
-}
-
-/// Temporary recovery only (desk-setups-spec 4.3): select the nearest surviving
-/// saved monitor by saved centre distance and arrangement rank. Keep the DIP
-/// offset and size; the existing title clamp keeps the recovered title reachable.
-/// Saved placements are untouched because this function accepts snapshots only.
-pub fn recover_removed_monitor(
-    device: &str,
-    requested: RequestedBody,
-    old: &Snapshot,
-    live: &Snapshot,
-    title: TitleReachability,
-) -> Option<Recovery> {
-    if live.find(device).is_some() {
-        return None;
-    }
-    let source = old.find(device);
-    let centre = |r: Rect| (i128::from(r.left) + i128::from(r.right),
-                           i128::from(r.top) + i128::from(r.bottom));
-    let source_centre = centre(source.map_or(requested.physical(), |d| d.bounds));
-    let distance = |r: Rect| {
-        let (x, y) = centre(r);
-        (x - source_centre.0).pow(2) + (y - source_centre.1).pow(2)
-    };
-    // Runtime device names join two snapshots of the same display-change event;
-    // they do not participate in persisted setup matching (spec 2.2).
-    let target = old.displays.iter()
-        .filter_map(|saved| live.find(&saved.device).map(|current| (saved, current)))
-        .min_by_key(|(saved, _)| (distance(saved.bounds), saved.bounds.left, saved.bounds.top))
-        .map(|(_, current)| current)
-        // No surviving saved monitor: new monitors use their current arrangement.
-        // This fallback is Corral's conservative choice for an incomplete snapshot.
-        .or_else(|| live.displays.iter().min_by_key(|d|
-            (distance(d.bounds), d.bounds.left, d.bounds.top)))?;
-    let recovered = if let Some(source) = source {
-        RequestedBody::from_dips(physical_to_dips(requested.physical(), source)?, target)?
-    } else {
-        requested
-    };
-    let recovered = clamp_title(recovered, target, title)?;
-    Some(Recovery {
-        kind: RecoveryKind::Nearest,
-        mapped_monitor: target.device.clone(),
-        placement: place_governed(recovered, recovered.physical(), target, live, None)?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,103 +549,11 @@ mod tests {
             display("primary", Rect::new(0, 0, 1920, 1080), 96, true),
         ])
         .unwrap();
-        let p = place(body(physical), physical, &snapshot).unwrap();
+        let p = place_governed(body(physical), physical, (&snapshot).nearest(((body(physical)).physical().left, (body(physical)).physical().top)).unwrap(), &snapshot, None).unwrap();
         assert_eq!(
             (p.monitor.as_str(), p.effective_dpi, p.rect_dip),
             ("left", 240, r)
         );
-    }
-
-    #[test]
-    fn side_by_side_crossing_preserves_requested_physical_extent() {
-        let live = side_by_side();
-        let start =
-            RequestedBody::from_dips(Rect::new(100, 100, 600, 400), &live.displays[0]).unwrap();
-        let moved = start.offset(2000, 0).unwrap();
-        let p = place(moved, moved.physical(), &live).unwrap();
-        assert_eq!(
-            (
-                p.monitor.as_str(),
-                p.centre_monitor.as_str(),
-                p.effective_dpi
-            ),
-            ("B", "B", 240)
-        );
-        assert_eq!(p.requested.physical(), Rect::new(2100, 100, 2600, 400));
-        assert_eq!(p.rect_dip, Rect::new(72, 40, 272, 160));
-        assert_eq!(
-            dips_to_physical(p.rect_dip, &live.displays[1]),
-            Some(moved.physical())
-        );
-    }
-
-    #[test]
-    fn stacked_crossing_uses_body_points_not_horizontal_overlap() {
-        let live = Snapshot::new(vec![
-            display("A", Rect::new(0, 0, 1920, 1080), 96, true),
-            display("B", Rect::new(0, -2160, 3840, 0), 240, false),
-        ])
-        .unwrap();
-        let r = Rect::new(100, -2000, 600, -1700);
-        let p = place(body(r), r, &live).unwrap();
-        assert_eq!(
-            (p.monitor.as_str(), p.effective_dpi, p.rect_dip),
-            ("B", 240, Rect::new(40, 64, 240, 184))
-        );
-        let spanning = Rect::new(100, -100, 600, 400);
-        let p = place(body(spanning), spanning, &live).unwrap();
-        assert_eq!(
-            (
-                p.monitor.as_str(),
-                p.centre_monitor.as_str(),
-                p.effective_dpi
-            ),
-            ("B", "A", 96)
-        );
-    }
-
-    #[test]
-    fn wide_straddling_body_identity_and_centre_dpi_are_independent() {
-        let live = side_by_side();
-        let r = Rect::new(1700, 100, 2700, 500);
-        let p = place(body(r), r, &live).unwrap();
-        assert_eq!(
-            (
-                p.monitor.as_str(),
-                p.centre_monitor.as_str(),
-                p.effective_dpi
-            ),
-            ("A", "B", 240)
-        );
-        assert_eq!(p.rect_dip, r); // identity-monitor conversion, never centre DPI
-    }
-
-    #[test]
-    fn effective_minimum_can_cross_without_resizing_requested_body() {
-        let live = side_by_side();
-        let requested = body(Rect::new(1800, 100, 1850, 150));
-        let p = place(requested, Rect::new(1800, 100, 2300, 700), &live).unwrap();
-        assert_eq!(
-            (
-                p.monitor.as_str(),
-                p.centre_monitor.as_str(),
-                p.effective_dpi
-            ),
-            ("A", "B", 240)
-        );
-        assert_eq!(p.requested, requested);
-        assert_eq!(p.rect_dip, requested.physical());
-    }
-
-    #[test]
-    fn right_resize_changes_only_centre_but_left_resize_can_change_identity() {
-        let live = side_by_side();
-        let right = Rect::new(1800, 100, 2400, 500);
-        let p = place(body(right), right, &live).unwrap();
-        assert_eq!((p.monitor.as_str(), p.effective_dpi), ("A", 240));
-        let left = Rect::new(1950, 100, 2400, 500);
-        let p = place(body(left), left, &live).unwrap();
-        assert_eq!((p.monitor.as_str(), p.effective_dpi), ("B", 240));
     }
 
     #[test]
@@ -839,7 +652,7 @@ mod tests {
             Snapshot::new(vec![display("A", Rect::new(0, 0, 3840, 2160), 240, true)]).unwrap();
         let r = body(Rect::new(100, 200, 601, 501));
         assert_eq!(classify(&old, &live).kind(), EventKind::DpiOnly);
-        let p = place(r, r.physical(), &live).unwrap();
+        let p = place_governed(r, r.physical(), (&live).nearest(((r).physical().left, (r).physical().top)).unwrap(), &live, None).unwrap();
         assert_eq!(p.requested, r);
         assert_eq!(p.rect_dip, Rect::new(40, 80, 240, 200));
         assert_eq!(p.effective_dpi, 240);
@@ -852,7 +665,7 @@ mod tests {
         let mut current = original;
         for _ in 0..1000 {
             current = current.offset(2000, 0).unwrap();
-            let p = place(current, current.physical(), &live).unwrap();
+            let p = place_governed(current, current.physical(), (&live).nearest(((current).physical().left, (current).physical().top)).unwrap(), &live, None).unwrap();
             assert_eq!(p.monitor, "B");
             assert_eq!(p.requested.physical().width(), 501);
             // Explicitly demonstrate integer DIP projection is lossy. Never
@@ -862,7 +675,7 @@ mod tests {
                 current.physical()
             );
             current = p.requested.offset(-2000, 0).unwrap();
-            let p = place(current, current.physical(), &live).unwrap();
+            let p = place_governed(current, current.physical(), (&live).nearest(((current).physical().left, (current).physical().top)).unwrap(), &live, None).unwrap();
             assert_eq!(p.requested, original);
             assert_eq!(p.rect_dip, original.physical());
         }
@@ -884,65 +697,6 @@ mod tests {
                 assert_eq!(rect, original);
             }
         }
-    }
-
-    #[test]
-    fn recovery_uses_saved_centres_even_after_current_arrangement_changes() {
-        let old = Snapshot::new(vec![
-            display("home", Rect::new(1000, 0, 2000, 1000), 96, false),
-            display("near", Rect::new(2000, 0, 3000, 1000), 96, false),
-            display("far", Rect::new(-2000, 0, -1000, 1000), 96, true),
-        ]).unwrap();
-        let live = Snapshot::new(vec![
-            display("near", Rect::new(-5000, 0, -4000, 1000), 96, false),
-            display("far", Rect::new(1000, 0, 2000, 1000), 96, true),
-        ]).unwrap();
-        let r = body(Rect::new(1100, 100, 1400, 300));
-        let recovered = recover_removed_monitor("home", r, &old, &live, title()).unwrap();
-        assert_eq!(recovered.mapped_monitor, "near");
-        assert_eq!(recovered.placement.rect_dip, Rect::new(100, 100, 400, 300));
-        assert_eq!(old.find("home").unwrap().bounds, Rect::new(1000, 0, 2000, 1000));
-    }
-
-    #[test]
-    fn recovery_ties_use_saved_arrangement_rank_instead_of_primary_or_list_order() {
-        let home = display("home", Rect::new(0, 0, 1000, 1000), 96, false);
-        let right = display("right", Rect::new(1000, 0, 2000, 1000), 96, true);
-        let left = display("left", Rect::new(-1000, 0, 0, 1000), 96, false);
-        for saved in [vec![home.clone(), right.clone(), left.clone()],
-                      vec![left.clone(), home.clone(), right.clone()]] {
-            let old = Snapshot::new(saved).unwrap();
-            let live = Snapshot::new(vec![right.clone(), left.clone()]).unwrap();
-            let recovered = recover_removed_monitor("home", body(Rect::new(80, 80, 380, 280)),
-                &old, &live, title()).unwrap();
-            assert_eq!(recovered.mapped_monitor, "left");
-        }
-    }
-
-    #[test]
-    fn recovery_preserves_dip_offset_and_size_across_dpi_and_resolution_changes() {
-        let home = display("home", Rect::new(-4000, -500, 0, 2500), 192, false);
-        let old = Snapshot::new(vec![home.clone(),
-            display("present", Rect::new(0, 0, 2000, 1500), 96, true)]).unwrap();
-        for (bounds, dpi) in [(Rect::new(20, 50, 3020, 2050), 144),
-                              (Rect::new(-2000, -1000, 0, 500), 96)] {
-            let live = Snapshot::new(vec![display("present", bounds, dpi, true)]).unwrap();
-            let dip = Rect::new(100, 100, 400, 300);
-            let r = RequestedBody::from_dips(dip, &home).unwrap();
-            let recovered = recover_removed_monitor("home", r, &old, &live, title()).unwrap();
-            assert_eq!(recovered.placement.rect_dip, dip);
-            assert_eq!((recovered.placement.requested.physical().width(),
-                        recovered.placement.requested.physical().height()),
-                       scale_size((300, 200), dpi).unwrap());
-            assert_eq!(r, RequestedBody::from_dips(dip, &home).unwrap());
-        }
-    }
-
-    #[test]
-    fn recovery_does_nothing_for_a_present_home() {
-        let old = side_by_side();
-        assert!(recover_removed_monitor("A", body(Rect::new(10, 50, 310, 250)),
-            &old, &old, title()).is_none());
     }
 
     #[test]
@@ -1006,20 +760,10 @@ mod tests {
         );
         let empty = Snapshot::new(vec![]).unwrap();
         assert!(
-            place(
+            place_governed(
                 body(Rect::new(0, 0, 100, 100)),
                 Rect::new(0, 0, 100, 100),
-                &empty
-            )
-            .is_none()
-        );
-        assert!(
-            recover_removed_monitor(
-                "A",
-                body(Rect::new(0, 0, 100, 100)),
-                &side_by_side(),
-                &empty,
-                title()
+                &d, &empty, None
             )
             .is_none()
         );
@@ -1062,7 +806,7 @@ mod tests {
     /// One step of the App's title drag: sticky governing monitor, DIP size, grab proportional.
     fn drag_step(live: &Snapshot, gov: &str, grab: Grab, cursor: (i32, i32)) -> (String, RequestedBody) {
         let g = govern(live, gov, |m| {
-            let b = move_layout(grab, cursor, m.dpi)?.physical();
+            let b = move_layout_fitted(grab, cursor, m, grab.size_dip)?.physical();
             Some(Rect::new(
                 b.left,
                 b.top,
@@ -1071,7 +815,7 @@ mod tests {
             ))
         })
         .unwrap();
-        (g.device.clone(), move_layout(grab, cursor, g.dpi).unwrap())
+        (g.device.clone(), move_layout_fitted(grab, cursor, g, grab.size_dip).unwrap())
     }
 
     /// Sweep the cursor along y from x0 to x1 in 1 px steps; returns the final monitor and the

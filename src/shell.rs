@@ -6,7 +6,6 @@
 //! COM must be initialized by the caller on the calling thread (apartment-threaded,
 //! `COINIT_APARTMENTTHREADED`); nothing here initializes it. Nothing in this module modifies,
 //! moves or deletes files.
-#![allow(dead_code)]
 
 use std::ffi::c_void;
 use std::mem::size_of;
@@ -666,18 +665,6 @@ mod tests {
             }
         }
         px
-    }
-
-    /// What `DrawIconEx` effectively did before: point sampling.
-    fn nearest(src: &[u8], sw: usize, dw: usize) -> Vec<u8> {
-        let mut out = vec![0u8; dw * dw * 4];
-        for y in 0..dw {
-            for x in 0..dw {
-                let (sx, sy) = (x * sw / dw, y * sw / dw);
-                out[(y * dw + x) * 4..][..4].copy_from_slice(&src[(sy * sw + sx) * 4..][..4]);
-            }
-        }
-        out
     }
 
     #[test]

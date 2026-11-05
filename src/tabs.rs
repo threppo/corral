@@ -510,23 +510,6 @@ pub fn delete(doc: &TabDoc, id: u64) -> Result<TabDoc, TabError> {
     w.finish(doc, &[id])
 }
 
-/// For imported data only (an import is a conversion, not a load): every set is written in canonical
-/// form, one-member sets dissolve and the counter passes every id seen.
-pub fn canonicalize(doc: &TabDoc) -> TabDoc {
-    let mut groups = doc.groups.clone();
-    let sets = normalize_sets(&groups);
-    let highest = groups.iter().filter_map(stored_set).max().unwrap_or(0);
-    for g in groups.iter_mut() { g.tab = None }
-    for set in &sets {
-        for (i, id) in set.tabs.iter().enumerate() {
-            if let Some(g) = groups.iter_mut().find(|g| g.id == *id) {
-                g.tab = Some(TabMembership { set_id: set.id, index: i as u32, selected: i == set.selected });
-            }
-        }
-    }
-    TabDoc { groups, next_tab_set: doc.next_tab_set.max(highest.saturating_add(1)).max(1) }
-}
-
 /// Whether a tab edit may be written now: not on a locked desktop and not while a display transition is
 /// pending (the live layout is then not the one that is stored).
 pub fn edit_allowed(locked: bool, display_transition_pending: bool) -> Result<(), TabError> {
@@ -782,7 +765,6 @@ pub fn hover_switch_step(state: HoverState, input: HoverInput) -> (HoverState, H
         (state, HoverOut::Wait((wait as u64 - elapsed) as u32))
     }
 }
-
 
 fn empty(rect: Rect) -> bool {
     rect.left >= rect.right || rect.top >= rect.bottom
@@ -1382,20 +1364,6 @@ mod tests {
     }
 
     #[test]
-    fn imported_data_is_written_in_canonical_form() {
-        let mut d = doc(5);
-        raw(&mut d, 1, 4, 5, false);
-        raw(&mut d, 2, 4, 2, true);
-        raw(&mut d, 3, 9, 0, true);
-        let c = canonicalize(&d);
-        assert_eq!(g(&c, 2).tab, Some(TabMembership { set_id: 4, index: 0, selected: true }));
-        assert_eq!(g(&c, 1).tab, Some(TabMembership { set_id: 4, index: 1, selected: false }));
-        assert_eq!(g(&c, 3).tab, None, "a one-member set dissolves");
-        assert_eq!(c.next_tab_set, 10, "ids seen are never reused");
-        assert_eq!(canonicalize(&c), c);
-    }
-
-    #[test]
     fn undoing_a_gesture_keeps_changes_made_meanwhile() {
         let before = with_set(doc(4), 5, &[1, 2, 3], 2);
         // the gesture tears tab 3 off; meanwhile a timer assigns an item to Corral 3 and renames Corral 4
@@ -1587,7 +1555,7 @@ mod tests {
 #[cfg(test)]
 mod strip_tests {
     use super::*;
-    use crate::group_paint::r;
+    use crate::group_paint::px as r;
 
     fn strip_at(dpi: u32) -> Rect {
         Rect::new(0, 10, 4000, 10 + r(24.0, dpi))

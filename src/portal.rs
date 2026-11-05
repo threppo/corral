@@ -5,7 +5,6 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::core::HSTRING;
 
-use std::cmp::Ordering;
 use std::time::Duration;
 
 use crate::geometry::Rect;
@@ -371,47 +370,6 @@ pub fn last_component(path: &str) -> &str {
     path.trim_end_matches('\\').rsplit('\\').next().filter(|s| !s.is_empty()).unwrap_or(path)
 }
 
-/// Explorer's default "Name" order: folders first, then a logical (digit-aware), case-insensitive
-/// name comparison (StrCmpLogicalW-like). Used by the headless `--probe-portal`.
-pub fn explorer_order(a_folder: bool, a_name: &str, b_folder: bool, b_name: &str) -> Ordering {
-    b_folder.cmp(&a_folder).then_with(|| logical_cmp(a_name, b_name))
-}
-
-fn logical_cmp(a: &str, b: &str) -> Ordering {
-    let (mut a, mut b) = (a.chars().peekable(), b.chars().peekable());
-    loop {
-        match (a.peek().copied(), b.peek().copied()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
-                let take = |it: &mut std::iter::Peekable<std::str::Chars>| {
-                    let mut digits = String::new();
-                    while let Some(c) = it.peek().copied().filter(char::is_ascii_digit) {
-                        digits.push(c);
-                        it.next();
-                    }
-                    digits
-                };
-                let (da, db) = (take(&mut a), take(&mut b));
-                let (ta, tb) = (da.trim_start_matches('0'), db.trim_start_matches('0'));
-                let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-            }
-            (Some(x), Some(y)) => {
-                let ord = x.to_lowercase().cmp(y.to_lowercase());
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-                a.next();
-                b.next();
-            }
-        }
-    }
-}
-
 /// Window-relative buttons below the three-line Gate error (folder-gate-host-spec 3.3).
 pub fn error_buttons(body: crate::geometry::Rect, dpi: u32) -> [crate::geometry::Rect; 2] {
     use crate::geometry::Rect;
@@ -501,7 +459,6 @@ pub fn take_probe(lparam: LPARAM) -> Option<ProbeResult> {
     (lparam.0 != 0).then(|| *unsafe { Box::from_raw(lparam.0 as *mut ProbeResult) })
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,7 +480,6 @@ mod tests {
             }
         }
     }
-
 
     const ROOT: &str = r"C:\Data\Docs";
 
@@ -555,14 +511,6 @@ mod tests {
         assert_eq!(navigated_title("My stuff", "Docs", "Work"), None);
         assert_eq!(navigated_title("Docs", "Docs", "Docs"), None);
         assert_eq!(last_component(r"C:\Data\Docs\"), "Docs");
-    }
-
-    #[test]
-    fn folders_first_then_logical_names() {
-        let mut names = vec![(false, "file10.txt"), (true, "zeta"), (false, "File2.txt"), (true, "Alpha"), (false, "file1.txt")];
-        names.sort_by(|a, b| explorer_order(a.0, a.1, b.0, b.1));
-        let order: Vec<&str> = names.iter().map(|n| n.1).collect();
-        assert_eq!(order, ["Alpha", "zeta", "file1.txt", "File2.txt", "file10.txt"]);
     }
 
     // folder-gate-host-spec 8, test 3

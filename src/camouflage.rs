@@ -6,11 +6,6 @@ pub mod runtime;
 
 #[derive(Clone, Debug)]
 pub struct Palette {
-    // The two end colours of the gradient (spec 3.1); the engine reads `lut`, tests read these.
-    #[allow(dead_code)]
-    pub shadow: Rgb,
-    #[allow(dead_code)]
-    pub highlight: Rgb,
     pub lut: [Rgb; 256],
     pub hash: u64,
 }
@@ -100,7 +95,7 @@ fn guarded(mut shadow: [f32; 3], mut highlight: [f32; 3], cap: bool) -> Palette 
     for byte in lut.iter().flatten() {
         hash = (hash ^ *byte as u64).wrapping_mul(0x100000001b3);
     }
-    Palette { shadow: lut[0], highlight: lut[255], lut, hash }
+    Palette { lut, hash }
 }
 
 /// camouflage-spec 3.2: trimmed lightness bands, with a mean fallback below 16 samples.
@@ -316,8 +311,8 @@ mod tests {
         let palette = derive_tint_palette([160, 100, 60]);
         let mut pixels: Vec<_> = (0..=255u32).map(|v| 0xff000000 | v * 0x10101).collect();
         apply_duotone(&palette, 100, &mut pixels);
-        assert_eq!(channels(pixels[0]), palette.shadow.map(u32::from));
-        assert_eq!(channels(pixels[255]), palette.highlight.map(u32::from));
+        assert_eq!(channels(pixels[0]), palette.lut[0].map(u32::from));
+        assert_eq!(channels(pixels[255]), palette.lut[255].map(u32::from));
         let labs: Vec<_> = pixels.iter().map(|&p| rgb_to_lab(channels(p).map(|v| v as u8))).collect();
         assert!(labs.windows(2).all(|pair| pair[1][0] + 0.002 >= pair[0][0]));
         let mut identity = palette.clone();
@@ -332,15 +327,15 @@ mod tests {
     fn flat_wallpaper_guards_and_documented_neutral_targets() {
         for c in [[0; 3], [255; 3], [128; 3]] {
             let p = derive_wallpaper_palette(&[c; 1024]);
-            let (s, h) = (rgb_to_lab(p.shadow), rgb_to_lab(p.highlight));
+            let (s, h) = (rgb_to_lab(p.lut[0]), rgb_to_lab(p.lut[255]));
             assert!(h[0] - s[0] >= 0.345, "{c:?}: {s:?}, {h:?}");
             assert!(s[0] >= 0.095 && h[0] <= 0.975);
-            assert!(p.shadow.iter().all(|v| *v == p.shadow[0]));
-            assert!(p.highlight.iter().all(|v| *v == p.highlight[0]));
+            assert!(p.lut[0].iter().all(|v| *v == p.lut[0][0]));
+            assert!(p.lut[255].iter().all(|v| *v == p.lut[255][0]));
             let expected = match c[0] { 0 => Some((3u8, 85u8)), 255 => Some((134, 245)), _ => None };
             if let Some((s, h)) = expected {
-                assert!(p.shadow[0].abs_diff(s) <= 2);
-                assert!(p.highlight[0].abs_diff(h) <= 2);
+                assert!(p.lut[0][0].abs_diff(s) <= 2);
+                assert!(p.lut[255][0].abs_diff(h) <= 2);
             }
         }
     }
@@ -351,7 +346,7 @@ mod tests {
             let p = derive_wallpaper_palette(&[colour; 16]);
             let original = rgb_to_lab(colour);
             let hue = original[2].atan2(original[1]);
-            for c in [p.shadow, p.highlight] {
+            for c in [p.lut[0], p.lut[255]] {
                 let c = rgb_to_lab(c);
                 assert!(c[1].hypot(c[2]) <= 0.155);
                 let error = (c[2].atan2(c[1]) - hue).sin().abs().asin().to_degrees();
@@ -365,12 +360,12 @@ mod tests {
     fn two_tone_and_small_sample_fallback() {
         let mut samples = vec![[0; 3]; 512]; samples.extend(vec![[255; 3]; 512]);
         let p = derive_wallpaper_palette(&samples);
-        assert!(p.shadow[0] < 10 && p.highlight[0] > 240);
+        assert!(p.lut[0][0] < 10 && p.lut[255][0] > 240);
         let one = derive_wallpaper_palette(&[[85, 105, 125]]);
         for count in 0..16 {
             let p = derive_wallpaper_palette(&vec![[85, 105, 125]; count]);
             if count > 0 { assert_eq!(p.hash, one.hash); }
-            assert!(rgb_to_lab(p.highlight)[0] - rgb_to_lab(p.shadow)[0] >= 0.345);
+            assert!(rgb_to_lab(p.lut[255])[0] - rgb_to_lab(p.lut[0])[0] >= 0.345);
         }
     }
 
@@ -386,8 +381,8 @@ mod tests {
         }
         for colour in [[0; 3], [255; 3]] {
             let p = derive_tint_palette(colour);
-            assert!(rgb_to_lab(p.shadow)[0] >= 0.095);
-            assert!(rgb_to_lab(p.highlight)[0] <= 0.975);
+            assert!(rgb_to_lab(p.lut[0])[0] >= 0.095);
+            assert!(rgb_to_lab(p.lut[255])[0] <= 0.975);
         }
     }
 

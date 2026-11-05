@@ -92,7 +92,6 @@ fn main() {
         }
         Some("--probe") => probe(),
         Some("--probe-view") => probe_view(),
-        Some("--probe-portal") => probe_portal(args.get(1).map(String::as_str).unwrap_or(".")),
         // QA: the "Turn off sorting?" prompt alone (`--isdesktop` variant); prints the answer, changes nothing.
         Some("--qa-sort-prompt") => {
             let answer = sort_prompt::ask(args.iter().any(|a| a == "--isdesktop"));
@@ -126,20 +125,6 @@ fn main() {
 
 /// `--desktop` while another Corral runs on this desktop: nothing was touched.
 const EXIT_ALREADY_RUNNING: i32 = 3;
-
-/// Read-only: list a folder the way a Folder Portal orders it. Changes nothing.
-fn probe_portal(path: &str) {
-    let _ = unsafe { windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_APARTMENTTHREADED) };
-    match shell::enumerate_folder(path) {
-        Ok(mut items) => {
-            items.sort_by(|a, b| portal::explorer_order(a.is_folder, &a.display_name, b.is_folder, &b.display_name));
-            for item in items {
-                println!("{}	{}	{}", if item.is_folder { "dir " } else { "file" }, item.display_name, item.parsing_name);
-            }
-        }
-        Err(e) => println!("error: {e}"),
-    }
-}
 
 /// Read-only diagnostics: desktop host and monitors. Changes nothing.
 fn probe() {
@@ -203,5 +188,4 @@ fn probe_view() {
         Err(e) => println!("desktop view unavailable: {e}"),
     }
 }
-
 

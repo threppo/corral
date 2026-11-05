@@ -23,9 +23,6 @@ pub const FLAG_REVERSE: u32 = 0x1;
 pub const FLAG_NOT_MAINTAINED: u32 = 0x2;
 // Bit 4 of `sort_flags` held the old "folders first" choice. It is still read and kept so old
 // files load, but never written or acted on: folders are always first (spec 2, "Group first").
-/// Stored field 13 also carries the "show on all pages" bit, which is not a sort flag.
-pub const FIELD13_ALL_PAGES: u32 = 0x4000;
-
 
 /// Whether layouts re-sort the Corral.
 pub fn is_maintained(method: u32, flags: u32) -> bool {

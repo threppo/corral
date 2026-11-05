@@ -13,8 +13,6 @@ pub const RESTORE_FIRST: &str = "Back up the current layout first";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chosen {
-    Recapture,
-    Delete,
     Restore { backup_first: bool, never_ask: bool },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -211,28 +209,12 @@ mod tests {
                     )?;
                     surface.draw(|ctx| {
                         if *name == "name-backup-error" {
-                            dialog::draw_spec_state(
-                                ctx,
-                                spec,
-                                dpi,
-                                light,
-                                Some(super::super::backups::NAME_EMPTY),
-                                Some(dialog::Focus::Field),
-                                true,
-                            )
+                            dialog::draw_contents(ctx, spec, &crate::dialog::layout(spec, (spec).width), crate::dialog::layout(spec, (spec).width).height, 0., Some(dialog::Focus::Field), true, None, Some("Enter a name."), dpi, &crate::settings_ui::kit::theme::Theme::new(light), true)
                         } else if spec.field.is_some() {
                             // Match the initial native EDIT focus shown in the approved Figma frame.
-                            dialog::draw_spec_state(
-                                ctx,
-                                spec,
-                                dpi,
-                                light,
-                                None,
-                                Some(dialog::Focus::Field),
-                                false,
-                            )
+                            dialog::draw_contents(ctx, spec, &crate::dialog::layout(spec, (spec).width), crate::dialog::layout(spec, (spec).width).height, 0., Some(dialog::Focus::Field), false, None, None, dpi, &crate::settings_ui::kit::theme::Theme::new(light), true)
                         } else {
-                            dialog::draw_spec(ctx, spec, dpi, light)
+                            dialog::draw_contents(ctx, spec, &crate::dialog::layout(spec, (spec).width), crate::dialog::layout(spec, (spec).width).height, 0., None, false, None, None, dpi, &crate::settings_ui::kit::theme::Theme::new(light), true)
                         }
                     })?;
                     surface.save_png(&output.join(format!(

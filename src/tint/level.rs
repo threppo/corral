@@ -30,11 +30,6 @@ impl Level {
         Level::new(1, 1, k, vec![(colorref >> 16) as u8, (colorref >> 8) as u8, colorref as u8, 255], Some(colorref))
     }
 
-    /// Bytes of pixel data held.
-    #[allow(dead_code)]
-    pub fn bytes(&self) -> usize {
-        self.bgrx.len()
-    }
 }
 
 /// Fast 64-bit content hash: eight bytes per step, multiply-rotate mixing.

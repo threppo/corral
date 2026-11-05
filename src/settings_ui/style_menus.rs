@@ -1,5 +1,5 @@
 //! Settings command semantics reused by U3 inline appearance controls.
-//! Legacy popup UI was removed; persisted fields, command IDs and notices remain compatible.
+//! Legacy popup UI was removed; persisted fields and notices remain compatible.
 use crate::settings::Settings;
 
 /// A command a menu item stands for.
@@ -8,40 +8,9 @@ pub enum Cmd {
     RoundCorners,
     Blur,
     Outline,
-    BackgroundColor,
-    TextColor,
     Darken(u32),
     ButtonsOnHover,
     TitleBelowNearTop,
-}
-
-impl Cmd {
-    /// Menu id of the command (stable, non-zero).
-    pub fn id(self) -> usize {
-        match self {
-            Cmd::RoundCorners => 1,
-            Cmd::Blur => 2,
-            Cmd::Outline => 3,
-            Cmd::BackgroundColor => 4,
-            Cmd::TextColor => 5,
-            Cmd::Darken(n) => 10 + n.min(2) as usize,
-            Cmd::ButtonsOnHover => 20,
-            Cmd::TitleBelowNearTop => 22,
-        }
-    }
-    pub fn from_id(id: usize) -> Option<Cmd> {
-        Some(match id {
-            1 => Cmd::RoundCorners,
-            2 => Cmd::Blur,
-            3 => Cmd::Outline,
-            4 => Cmd::BackgroundColor,
-            5 => Cmd::TextColor,
-            10..=12 => Cmd::Darken((id - 10) as u32),
-            20 => Cmd::ButtonsOnHover,
-            22 => Cmd::TitleBelowNearTop,
-            _ => return None,
-        })
-    }
 }
 
 /// What the window must do after a settings-only command was applied.
@@ -54,8 +23,7 @@ pub enum Notice {
     TitleStaysBelow,
 }
 
-/// Apply a settings-only command (the colour commands are handled by the window).
-/// Returns `None` for the colour commands and for a disabled item.
+/// Apply a settings-only command; colour changes are handled by the window.
 pub fn apply(s: &mut Settings, cmd: Cmd) -> Option<Notice> {
     match cmd {
         Cmd::RoundCorners => s.square_edges = !s.square_edges,
@@ -81,38 +49,15 @@ pub fn apply(s: &mut Settings, cmd: Cmd) -> Option<Notice> {
                 Notice::TitleStaysBelow
             });
         }
-        Cmd::BackgroundColor | Cmd::TextColor => return None,
     }
     Some(Notice::None)
 }
 
-pub const BUTTONS_HIDDEN_TEXT: &str = "Titlebar buttons are now hidden.\n\nThe options of a Corral are still available by right-clicking its titlebar.";
 pub const TITLE_STAYS_BELOW_TEXT: &str = "Done. Titlebars no longer move underneath a Corral when it is placed near the top of the screen.\n\nCorrals already docked at the top keep their titlebar underneath until you move them. Pull such a Corral away from the edge to release it.";
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn commands_round_trip_through_ids() {
-        for cmd in [
-            Cmd::RoundCorners,
-            Cmd::Blur,
-            Cmd::Outline,
-            Cmd::BackgroundColor,
-            Cmd::TextColor,
-            Cmd::Darken(0),
-            Cmd::Darken(1),
-            Cmd::Darken(2),
-            Cmd::ButtonsOnHover,
-            Cmd::TitleBelowNearTop,
-        ] {
-            assert_eq!(Cmd::from_id(cmd.id()), Some(cmd));
-        }
-        assert_eq!(Cmd::from_id(21), None, "the retired id stays unused");
-        assert_eq!(Cmd::from_id(0), None);
-        assert_eq!(Cmd::from_id(99), None);
-    }
 
     #[test]
     fn every_toggle_changes_its_stored_field_and_back() {
@@ -158,14 +103,6 @@ mod tests {
             Some(Notice::TitleStaysBelow)
         );
         assert_eq!(apply(&mut s, Cmd::TitleBelowNearTop), Some(Notice::None));
-    }
-
-    #[test]
-    fn colour_commands_are_not_settings_only() {
-        let mut s = Settings::default();
-        assert_eq!(apply(&mut s, Cmd::BackgroundColor), None);
-        assert_eq!(apply(&mut s, Cmd::TextColor), None);
-        assert_eq!(s, Settings::default());
     }
 
     #[test]

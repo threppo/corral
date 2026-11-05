@@ -116,14 +116,14 @@ impl Element {
 
 fn control_type(kind: RowKind) -> UIA_CONTROLTYPE_ID {
     match kind {
-        RowKind::Check | RowKind::CheckRow | RowKind::Toggle | RowKind::Status => {
+        RowKind::CheckRow | RowKind::Toggle | RowKind::Status => {
             UIA_CheckBoxControlTypeId
         }
-        RowKind::Radio | RowKind::RadioRow | RowKind::Segmented | RowKind::TabStyleTile => {
+        RowKind::RadioRow | RowKind::Segmented | RowKind::TabStyleTile => {
             UIA_RadioButtonControlTypeId
         }
-        RowKind::Combo | RowKind::Dropdown => UIA_ComboBoxControlTypeId,
-        RowKind::Number | RowKind::Stepper => UIA_SpinnerControlTypeId,
+        RowKind::Dropdown => UIA_ComboBoxControlTypeId,
+        RowKind::Stepper => UIA_SpinnerControlTypeId,
         RowKind::ValueSlider => UIA_SliderControlTypeId,
         RowKind::Link | RowKind::Navigate => UIA_HyperlinkControlTypeId,
         RowKind::Button
@@ -243,19 +243,6 @@ fn segment_hit(row: &Row, value: i64) -> Hit {
     } else {
         Hit::Nothing
     }
-}
-
-/// Preparation may measure text, just as painting does. It owns every input, and never has
-/// a State reference across layout/Win32/DirectWrite calls. Conversion below is pure.
-fn measure(
-    settings: &Settings,
-    groups: &[GroupInfo],
-    view: View,
-    dpi: u32,
-    width: i32,
-    height: i32,
-) -> Result<Vec<Measured>> {
-    Ok(measure_page(settings, groups, view, dpi, width, height)?.0)
 }
 
 /// Layout only: never enter render_settings_editor, draw_page, or any preview renderer.
@@ -1992,18 +1979,11 @@ mod tests {
         };
         let (width, height) = (sc(1000., dpi), sc(760., dpi));
         Ok(build_elements(
-            measure(
-                &settings,
-                &[],
-                View {
+            measure_page(&settings, &[], View {
                     page: Page::Pages,
                     hover: None,
                     scroll: 0,
-                },
-                dpi,
-                width,
-                height,
-            )?,
+                }, dpi, width, height).map(|page| page.0)?,
             width as f32,
             height as f32,
             true,
@@ -2075,18 +2055,11 @@ mod tests {
         ));
         let (w, h) = (sc(1000., dpi), sc(760., dpi));
         Ok(build_elements(
-            measure(
-                &settings,
-                &[],
-                View {
+            measure_page(&settings, &[], View {
                     page,
                     hover: None,
                     scroll,
-                },
-                dpi,
-                w,
-                h,
-            )?,
+                }, dpi, w, h).map(|page| page.0)?,
             w as f32,
             h as f32,
             true,
@@ -2187,18 +2160,11 @@ mod tests {
         ));
         for page in Page::ALL {
             for dpi in [96, 240] {
-                let measured = measure(
-                    &settings,
-                    &[],
-                    View {
+                let measured = measure_page(&settings, &[], View {
                         page,
                         hover: None,
                         scroll: 0,
-                    },
-                    dpi,
-                    sc(1000., dpi),
-                    sc(760., dpi),
-                )?;
+                    }, dpi, sc(1000., dpi), sc(760., dpi)).map(|page| page.0)?;
                 for m in measured.iter().filter(|m| {
                     m.enabled
                         && matches!(
@@ -2288,14 +2254,13 @@ mod tests {
         let kinds = [
             (RowKind::Toggle, UIA_CheckBoxControlTypeId),
             (RowKind::CheckRow, UIA_CheckBoxControlTypeId),
-            (RowKind::Check, UIA_CheckBoxControlTypeId),
-            (RowKind::Radio, UIA_RadioButtonControlTypeId),
+
             (RowKind::RadioRow, UIA_RadioButtonControlTypeId),
             (RowKind::Segmented, UIA_RadioButtonControlTypeId),
             (RowKind::Dropdown, UIA_ComboBoxControlTypeId),
-            (RowKind::Combo, UIA_ComboBoxControlTypeId),
+
             (RowKind::Stepper, UIA_SpinnerControlTypeId),
-            (RowKind::Number, UIA_SpinnerControlTypeId),
+
             (RowKind::ValueSlider, UIA_SliderControlTypeId),
             (RowKind::Link, UIA_HyperlinkControlTypeId),
             (RowKind::Navigate, UIA_HyperlinkControlTypeId),
@@ -2309,7 +2274,7 @@ mod tests {
             (RowKind::Expander, UIA_ButtonControlTypeId),
             (RowKind::InfoBox, UIA_TextControlTypeId),
             (RowKind::Label, UIA_TextControlTypeId),
-            (RowKind::Note, UIA_TextControlTypeId),
+
             (RowKind::Tiles, UIA_TextControlTypeId),
         ];
         let measured = kinds

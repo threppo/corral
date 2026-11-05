@@ -238,7 +238,6 @@ fn one_hundred_drafts_through_the_throttle_and_the_commit_stores_the_final_draft
         }
     }
     assert!((5..=8).contains(&sent), "about one frame per 16 ms, got {sent}");
-    assert!(throttle.pending(), "the last frames were coalesced away");
     assert!(last_sent_value < 1100);
     let commit = commit_of(p.end(false));
     assert_eq!(commit.patch.transparency_factor, Some(1100), "commit carries the page's latest draft");
@@ -447,7 +446,7 @@ fn the_overlay_shows_on_top_of_stored_data_and_each_end_puts_the_stored_look_bac
         assert_ne!(l, stored.0, "{path}: shown");
         assert!(host.end(&mut l, &mut s), "{path}");
         assert_eq!((l.clone(), s.clone()), stored, "{path}: stored look is back");
-        assert!(!host.is_active());
+        assert!(host.current().is_none());
     }
 }
 
@@ -467,17 +466,15 @@ fn a_frame_with_another_session_id_ends_the_older_overlay_first() {
 }
 
 #[test]
-fn a_commit_settles_the_overlay_without_putting_anything_back_and_a_missing_corral_ends_it() {
+fn a_missing_corral_ends_the_overlay() {
     let (mut l, mut s, id) = overlay_fixture();
     let mut host = OverlayHost::default();
     host.preview(&mut l, &mut s, 1, Some(id), &draft(0x99)).unwrap();
-    assert!(host.settle().is_some());
-    assert!(!host.is_active() && !host.end(&mut l, &mut s));
-    assert_eq!(l.groups[0].style.color, Some(0x99), "the committed value stays");
+    host.end(&mut l, &mut s);
     host.preview(&mut l, &mut s, 3, Some(id), &draft(0x12)).unwrap();
     assert_eq!(host.preview(&mut l, &mut s, 3, Some(id + 50), &draft(1)), Err(OverlayError::MissingCorral));
-    assert!(!host.is_active());
-    assert_eq!(l.groups[0].style.color, Some(0x99), "the failed frame also put the overlay back");
+    assert!(host.current().is_none());
+    assert_eq!(l.groups[0].style.color, Some(0x77), "the failed frame also put the overlay back");
 }
 
 #[test]
@@ -493,7 +490,7 @@ fn unfinished_drafts_are_never_part_of_a_save_copy_and_a_settings_reload_cancels
     assert!(host.cancel_for_reload(&mut l));
     assert_eq!(l.groups[0].style.color, Some(0x77), "the Corral part of the draft is taken off");
     assert_eq!(s.text_color, 5, "the freshly loaded settings are untouched");
-    assert!(!host.is_active());
+    assert!(host.current().is_none());
 }
 // ---- resets ----------------------------------------------------------------------------------
 
@@ -574,7 +571,7 @@ fn every_reset_is_idempotent_and_with_no_own_look_base_equals_all() {
     for g in &mut l.groups {
         color_state_clear(&mut g.style);
     }
-    assert!(!any_own_look(&l));
+    assert!(l.groups.iter().all(|g| !has_own_look(&g.style)));
     let (mut l2, mut s2) = (l.clone(), s.clone());
     apply(&mut l, &mut s, &Action::ResetBase).unwrap();
     apply(&mut l2, &mut s2, &Action::ResetAll).unwrap();

@@ -11,7 +11,7 @@ use super::kit::{
     controls::{self, ButtonStyle, Control, VisualState},
     theme::Theme as Tokens,
 };
-use super::{CONTROL_POINTER, FOCUS_RING, Header, Theme, UI, page_header, scf, style};
+use super::{FOCUS_RING, Header, Theme, UI, page_header, scf, style};
 use crate::render::{Align, Ctx, RectF, Rgba, measure_text};
 use crate::round_up::{Destination, Rule};
 use crate::settings::Settings;
@@ -650,10 +650,7 @@ pub fn focus_targets(lay: &Lay) -> Vec<(RectF, Action)> {
 }
 
 fn pointer_state(r: RectF, selected: bool) -> VisualState {
-    let pointer = CONTROL_POINTER.with(|p| p.get());
-    let hovered =
-        pointer.is_some_and(|(x, y, _)| x >= r.left && x < r.right && y >= r.top && y < r.bottom);
-    let pressed = hovered && pointer.is_some_and(|(_, _, pressed)| pressed);
+    let (hovered, pressed) = super::control_pointer_state(r);
     VisualState {
         selected,
         hovered,

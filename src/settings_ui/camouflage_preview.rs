@@ -307,9 +307,6 @@ fn surface_snapshots() -> Vec<tint::Wallpaper> {
     rx.recv_timeout(std::time::Duration::from_millis(300))
         .unwrap_or_default()
 }
-fn composite_surface(dst: &mut tint::Wallpaper, src: &tint::Wallpaper) {
-    composite_surface_scaled(dst, src, 1);
-}
 /// Blend a window snapshot (physical pixels) onto a preview image that holds one pixel per `k x k`
 /// screen pixels (wallpaper-blur-spec 8: the preview works at a reduced scale).
 fn composite_surface_scaled(dst: &mut tint::Wallpaper, src: &tint::Wallpaper, k: i32) {
@@ -573,7 +570,6 @@ pub(super) fn box_size(avail_w: f32, client_h: f32, monitor: (i32, i32), dpi: u3
     }
     (w.floor().max(1.0), h.floor().max(1.0))
 }
-pub(super) const NOTICE_H: f32 = 34.0;
 
 struct Preview {
     source: Rc<tint::Wallpaper>,
@@ -1130,7 +1126,7 @@ mod tests {
             bgra: vec![255, 0, 0, 255, 0, 0, 0, 0, 50, 10, 0, 128],
             solid: None,
         };
-        composite_surface(&mut dst, &src);
+        composite_surface_scaled(&mut dst, &src, 1);
         assert_eq!(&dst.bgra[..4], &[10, 20, 30, 255]);
         assert_eq!(&dst.bgra[4..], &[55, 20, 15, 255]);
     }
@@ -1249,7 +1245,7 @@ mod tests {
                     super::super::sc(655.0, dpi) as u32,
                 )
                 .unwrap();
-                super::super::render_settings_state(&mut surface, &view, &settings, &theme, dpi)
+                super::super::render_settings_editor(&mut surface, &view, &settings, &[], &theme, dpi, None)
                     .unwrap();
                 let before = surface.pixels().to_vec();
                 let ptr = CACHE.with(|c| {
@@ -1262,7 +1258,7 @@ mod tests {
                         .3
                         .as_ptr()
                 });
-                super::super::render_settings_state(&mut surface, &view, &settings, &theme, dpi)
+                super::super::render_settings_editor(&mut surface, &view, &settings, &[], &theme, dpi, None)
                     .unwrap();
                 assert_eq!(
                     ptr,
@@ -1278,7 +1274,7 @@ mod tests {
                 );
                 assert_eq!(before, surface.pixels());
                 settings.desktop_blend_icons = true;
-                super::super::render_settings_state(&mut surface, &view, &settings, &theme, dpi)
+                super::super::render_settings_editor(&mut surface, &view, &settings, &[], &theme, dpi, None)
                     .unwrap();
                 assert_ne!(before, surface.pixels(), "toggle dpi {dpi}");
                 let lay = super::super::layout_page(

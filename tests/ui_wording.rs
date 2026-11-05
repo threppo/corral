@@ -96,9 +96,10 @@ fn technical_exception(path: &str, text: &str, line: &str) -> bool {
         // Persistent/import keys and Shell property names must remain compatible.
         ("settings.rs", "Rules") if line.contains("serde(rename") => true,
         ("settings/round_up_store.rs", "Rules") => true, // the old settings key the migration reads
+        ("settings_ui/settings_merge.rs", "Rules") if line.contains(".get(") => true, // stored-key comparison
         ("explorer_browser.rs", "Corral.Portal") => true,
         // CLI options, worker thread names and stable QA artifact names.
-        ("main.rs", "--page" | "--probe-portal") => true,
+        ("main.rs", "--page") => true,
         ("peek_keys.rs", "peek-keys-hook") => true,
         ("app/pages_glue.rs", "pages-frame.png" | "pages-current.png" | "pages-from.png" | "pages-to.png") => true,
         ("app/peek.rs", "portal-popup#{id}") => true,
@@ -164,6 +165,8 @@ fn scanner_catches_names_marks_raw_strings_and_escaped_line_breaks() {
     assert_eq!(strings.iter().filter(|(at, _)| !tests.iter().any(|(a, b)| (*a..*b).contains(at))).count(), 2);
     assert!(!technical_exception("settings_ui/content.rs", "portal text", "lbl("));
     assert!(!technical_exception("settings_ui/content.rs", "Rules", "title: "));
+    assert!(technical_exception("settings_ui/settings_merge.rs", "Rules", "edits.get(\"Rules\")"));
+    assert!(!technical_exception("settings_ui/settings_merge.rs", "Rules", "title: \"Rules\""));
     assert!(approved_redesign_copy("settings_ui/rules_page.rs", "Your rules"));
     assert!(approved_redesign_copy("settings_ui/rules_dialog.rs", "Rules higher in the list win when several match the same icon."));
     assert!(!approved_redesign_copy("settings_ui/content.rs", "Your rules"));

@@ -13,13 +13,11 @@
 //! when the closure itself succeeded. All coordinates are device pixels (the target runs at 96 dpi,
 //! so one DIP equals one pixel); colours are straight-alpha [`Rgba`], premultiplied by Direct2D.
 
-#![allow(dead_code)]
-
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::Path;
 
-use windows::Win32::Foundation::{COLORREF, GENERIC_READ, GENERIC_WRITE, HWND, POINT, RECT, SIZE};
+use windows::Win32::Foundation::{COLORREF, GENERIC_WRITE, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_POINT_2F, D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_COLOR_F, D2D1_GRADIENT_STOP,
     D2D1_PIXEL_FORMAT,
@@ -365,22 +363,6 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    /// Group-only contour: use the same geometry-group raster path as the
-    /// outer-minus-inner outline. The specialised rounded-rectangle primitive
-    /// has different edge coverage from that path at some integer DPI radii.
-    pub fn fill_group_rounded_rect(&self, rect: RectF, radius: f32, color: Rgba) -> Result<()> {
-        use windows::Win32::Graphics::Direct2D::Common::D2D1_FILL_MODE_ALTERNATE;
-        let radius = radius.max(0.0).min((rect.right-rect.left)/2.0).min((rect.bottom-rect.top)/2.0);
-        let rr = D2D1_ROUNDED_RECT { rect: rect.to_d2d(), radiusX: radius, radiusY: radius };
-        let brush = self.brush(color)?;
-        unsafe {
-            let outer = self.factories.d2d.CreateRoundedRectangleGeometry(&rr)?;
-            let shape = self.factories.d2d.CreateGeometryGroup(D2D1_FILL_MODE_ALTERNATE, &[Some(outer.cast()?)])?;
-            self.rt.FillGeometry(&shape, &brush, None);
-        }
-        Ok(())
-    }
-
     /// Stroke lies fully inside `rect` (the geometry is inset by half the width).
     pub fn stroke_rounded_rect(&self, rect: RectF, radius: f32, width: f32, color: Rgba) -> Result<()> {
         let brush = self.brush(color)?;
@@ -392,32 +374,6 @@ impl Ctx<'_> {
         };
         // SAFETY: inside Begin/End.
         unsafe { self.rt.DrawRoundedRectangle(&rr, &brush, width, None::<&ID2D1StrokeStyle>) };
-        Ok(())
-    }
-
-    /// A border cut from the exact filled shape. Using outer-minus-inner fills
-    /// keeps the outer corner on FillRoundedRectangle's contour at every DPI;
-    /// no independent pen centreline or pen-radius convention is involved.
-    pub fn fill_rounded_border(&self, rect: RectF, radius: f32, width: f32, color: Rgba) -> Result<()> {
-        use windows::Win32::Graphics::Direct2D::Common::D2D1_FILL_MODE_ALTERNATE;
-        if width <= 0.0 || rect.right <= rect.left || rect.bottom <= rect.top { return Ok(()) }
-        let brush = self.brush(color)?;
-        let radius = radius.max(0.0).min((rect.right-rect.left)/2.0).min((rect.bottom-rect.top)/2.0);
-        let outer = D2D1_ROUNDED_RECT { rect: rect.to_d2d(), radiusX: radius, radiusY: radius };
-        let inner_rect = rect.inset(width);
-        if inner_rect.right <= inner_rect.left || inner_rect.bottom <= inner_rect.top {
-            return self.fill_rounded_rect(rect, radius, color);
-        }
-        let inner_radius = (radius-width).max(0.0);
-        let inner = D2D1_ROUNDED_RECT { rect: inner_rect.to_d2d(), radiusX: inner_radius, radiusY: inner_radius };
-        // SAFETY: both geometries and the brush outlive this synchronous fill.
-        unsafe {
-            let outer = self.factories.d2d.CreateRoundedRectangleGeometry(&outer)?;
-            let inner = self.factories.d2d.CreateRoundedRectangleGeometry(&inner)?;
-            let ring = self.factories.d2d.CreateGeometryGroup(D2D1_FILL_MODE_ALTERNATE,
-                &[Some(outer.cast()?), Some(inner.cast()?)])?;
-            self.rt.FillGeometry(&ring, &brush, None);
-        }
         Ok(())
     }
 
@@ -727,6 +683,33 @@ pub fn measure_text(text: &str, family: &str, size_px: f32, weight: u16) -> Resu
 
 /// As [`measure_text`] with the italic flag, so a title is measured with the font it is drawn with.
 pub fn measure_text_styled(text: &str, family: &str, size_px: f32, weight: u16, italic: bool) -> Result<(f32, f32)> {
+    let key = MeasureKey { text: text.into(), family: family.into(), size: size_px.to_bits(), weight, italic };
+    if let Some(metrics) = TEXT_MEASUREMENTS.with(|cache| cache.borrow().get(&key).copied()) {
+        return Ok(metrics);
+    }
+    let metrics = measure_text_uncached(text, family, size_px, weight, italic)?;
+    TEXT_MEASUREMENTS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= TEXT_MEASUREMENT_LIMIT { cache.clear(); }
+        cache.insert(key, metrics);
+    });
+    Ok(metrics)
+}
+
+const TEXT_MEASUREMENT_LIMIT: usize = 512;
+#[derive(PartialEq, Eq, Hash)]
+struct MeasureKey { text: String, family: String, size: u32, weight: u16, italic: bool }
+thread_local! {
+    static TEXT_MEASUREMENTS: RefCell<std::collections::HashMap<MeasureKey, (f32, f32)>> = RefCell::new(std::collections::HashMap::new());
+}
+
+/// Theme colours do not affect metrics; font scale is already part of the size key.
+/// Clear on system font/settings changes as well as factory teardown.
+pub fn clear_text_measurements() {
+    TEXT_MEASUREMENTS.with(|cache| cache.borrow_mut().clear());
+}
+
+fn measure_text_uncached(text: &str, family: &str, size_px: f32, weight: u16, italic: bool) -> Result<(f32, f32)> {
     let f = factories()?;
     let layout = make_layout_styled(&f.dwrite, text, family, size_px, weight, italic, 100_000.0, 100_000.0)?;
     let mut m = DWRITE_TEXT_METRICS::default();
@@ -770,6 +753,7 @@ pub fn font_has_glyphs(family: &str, codepoints: &[u32]) -> Option<Vec<bool>> {
 }
 
 /// `(ascent, descent, line gap)` of `family` in em units (corral-painting-spec 2.2).
+#[cfg(not(test))]
 pub fn font_line_metrics_em(family: &str, weight: u16) -> Option<(f64, f64, f64)> {
     use windows::Win32::Graphics::DirectWrite::DWRITE_FONT_METRICS;
     let face = font_face(family, weight)?;
@@ -783,6 +767,7 @@ pub fn font_line_metrics_em(family: &str, weight: u16) -> Option<(f64, f64, f64)
 /// Release this thread's Direct2D/DirectWrite factories. Call before the UI thread exits:
 /// releasing them from thread-local destructors during process teardown raises in KERNELBASE.
 pub fn release_factories() {
+    clear_text_measurements();
     TEXT_LAYOUTS.with(|cache|cache.borrow_mut().clear());
     FACTORIES.with(|cell| {
         cell.borrow_mut().take();
@@ -810,6 +795,31 @@ pub fn present_layered(hwnd: HWND, surface: &Surface, screen_pos: (i32, i32), al
 mod tests {
     use super::*;
     use windows::Win32::Graphics::Imaging::WICDecodeMetadataCacheOnDemand;
+
+    #[test]
+    fn measurement_memo_matches_directwrite_and_is_bounded() {
+        clear_text_measurements();
+        for text in ["", "word with trailing space ", "Zażółć 世界"] {
+            for (family, size, weight, italic) in [
+                ("Segoe UI", 14.0, 400, false), ("Segoe UI", 21.0, 700, true),
+                ("Arial", 14.0, 400, true), ("Segoe UI", 14.0, 700, false),
+            ] {
+                let direct = measure_text_uncached(text, family, size, weight, italic).unwrap();
+                for _ in 0..2 {
+                    let memo = measure_text_styled(text, family, size, weight, italic).unwrap();
+                    assert_eq!((memo.0.to_bits(), memo.1.to_bits()), (direct.0.to_bits(), direct.1.to_bits()));
+                }
+            }
+        }
+        clear_text_measurements();
+        for n in 0..=TEXT_MEASUREMENT_LIMIT {
+            measure_text(&format!("measurement {n}"), "Segoe UI", 14.0, 400).unwrap();
+            TEXT_MEASUREMENTS.with(|cache| assert!(cache.borrow().len() <= TEXT_MEASUREMENT_LIMIT));
+        }
+        TEXT_MEASUREMENTS.with(|cache| assert_eq!(cache.borrow().len(), 1));
+        clear_text_measurements();
+        TEXT_MEASUREMENTS.with(|cache| assert!(cache.borrow().is_empty()));
+    }
 
     fn px(s: &Surface, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * s.width() + x) * 4) as usize;
@@ -897,7 +907,7 @@ mod tests {
         let (w, h) = unsafe {
             let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).unwrap();
             let dec = wic
-                .CreateDecoderFromFilename(&name, None, GENERIC_READ, WICDecodeMetadataCacheOnDemand)
+                .CreateDecoderFromFilename(&name, None, windows::Win32::Foundation::GENERIC_READ, WICDecodeMetadataCacheOnDemand)
                 .unwrap();
             let frame = dec.GetFrame(0).unwrap();
             let (mut w, mut h) = (0, 0);

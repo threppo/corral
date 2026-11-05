@@ -8,7 +8,6 @@
 //! COM must be initialized by the caller on the calling thread (apartment-threaded,
 //! `COINIT_APARTMENTTHREADED`); nothing here initializes it. Item names use the same
 //! `SIGDN_DESKTOPABSOLUTEPARSING` form as `crate::shell`.
-#![allow(dead_code)]
 
 use std::ffi::c_void;
 

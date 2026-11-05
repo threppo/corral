@@ -19,8 +19,6 @@
 //!   different filesystem parents, so mixed selections yield `Err` (the caller may fall back to a
 //!   per-parent menu or the first item's parent).
 
-#![allow(dead_code)]
-
 use std::ffi::c_void;
 use std::mem::size_of;
 
@@ -271,15 +269,6 @@ impl ShellMenu {
         (self.first..=self.last).contains(&id) && self.gate_new_submenu.is_some_and(|menu| contains(menu, id))
     }
 
-    /// Background menu of a live shell view (`IShellView::GetItemObject(SVGIO_BACKGROUND)`): the
-    /// view's own View / Sort by / Group by / Refresh / Paste / New / Properties entries, as shown by
-    /// a Folder Portal's body.
-    pub fn for_view_background(view: &windows::Win32::UI::Shell::IShellView) -> Result<ShellMenu> {
-        let ctx: IContextMenu = unsafe { view.GetItemObject(windows::Win32::UI::Shell::SVGIO_BACKGROUND)? };
-        let menu = unsafe { CreatePopupMenu()? };
-        Self::build(menu, ctx, CMF_NORMAL)
-    }
-
     pub fn hmenu(&self) -> HMENU {
         self.menu
     }
@@ -510,49 +499,4 @@ mod tests {
         let missing = std::env::temp_dir().join("corral_shell_menu_does_not_exist_9f3a").join("nope.txt");
         assert!(ShellMenu::for_items(HWND::default(), &[missing.to_string_lossy().to_string()]).is_err());
     }
-}
-
-/// The shell's View submenu inside a background menu, found when the
-/// localized name does not match: a submenu
-/// of exactly 8 items whose command ids run `id0 = id1 + 1 = id2 + 2`, `id2 = id4 + 1`,
-/// `id4 = id5 + 1`, `id5 = id7 + 2` (positions 3 and 6 are separators: the desktop-style
-/// Large/Medium/Small, Auto arrange/Align, Show desktop icons menu of an `FWF_DESKTOP` view).
-pub fn find_view_submenu(menu: HMENU) -> Option<HMENU> {
-    use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuItemID, GetSubMenu};
-    let count = unsafe { GetMenuItemCount(menu) };
-    (0..count).find_map(|i| {
-        let sub = unsafe { GetSubMenu(menu, i) };
-        if sub.is_invalid() || unsafe { GetMenuItemCount(sub) } != 8 {
-            return None;
-        }
-        let id = |p: i32| unsafe { GetMenuItemID(sub, p) };
-        let matches = id(0) == id(1).wrapping_add(1)
-            && id(1) == id(2).wrapping_add(1)
-            && id(2) == id(4).wrapping_add(1)
-            && id(4) == id(5).wrapping_add(1)
-            && id(5) == id(7).wrapping_add(2);
-        matches.then_some(sub)
-    })
-}
-
-/// One-line description of a menu (ids, separators, texts, one submenu level) for the log.
-pub fn describe_menu(menu: HMENU, depth: u32) -> String {
-    use windows::Win32::UI::WindowsAndMessaging::{GetMenuItemCount, GetMenuItemID, GetMenuStringW, GetSubMenu, MF_BYPOSITION};
-    let count = unsafe { GetMenuItemCount(menu) };
-    let mut out = Vec::new();
-    for i in 0..count {
-        let mut buffer = [0u16; 128];
-        let len = unsafe { GetMenuStringW(menu, i as u32, Some(&mut buffer), MF_BYPOSITION) }.max(0) as usize;
-        let text = String::from_utf16_lossy(&buffer[..len.min(buffer.len())]);
-        let sub = unsafe { GetSubMenu(menu, i) };
-        if !sub.is_invalid() {
-            let inner = if depth > 0 { describe_menu(sub, depth - 1) } else { String::new() };
-            out.push(format!("[{text} > {inner}]"));
-        } else if text.is_empty() {
-            out.push("-".to_string());
-        } else {
-            out.push(format!("{:#x} {text}", unsafe { GetMenuItemID(menu, i) }));
-        }
-    }
-    out.join(" | ")
 }

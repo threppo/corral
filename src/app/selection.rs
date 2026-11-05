@@ -223,44 +223,6 @@ pub(super) fn first_free_grid_cell(area: &Rect, cell: (i32, i32), blocked: &[Rec
     }
 }
 
-/// Where a dropped loose icon goes: `want` clamped into `area`; when that cell overlaps something
-/// in `blocked` (other loose icons, groups) the nearest free cell of the area's grid. When no
-/// cell is free the clamped `want` is kept (on screen, overlapping), never an off-screen one.
-pub(super) fn nearest_free_cell(want: (i32, i32), cell: (i32, i32), area: &Rect, blocked: &[Rect]) -> (i32, i32) {
-    let want = clamp_cell(want, cell, area);
-    let free = |origin: (i32, i32)| !blocked.iter().any(|b| b.overlap_area(&cell_rect(origin, cell)) > 0);
-    if free(want) {
-        return want;
-    }
-    let rows = grid_rows(area, cell);
-    let columns = (area.width() / cell.0.max(1)).max(1);
-    let mut best: Option<(i64, (i32, i32))> = None;
-    for slot in 0..rows * columns {
-        let origin = clamp_cell(grid_cell(area, cell, rows, slot), cell, area);
-        let (dx, dy) = ((origin.0 - want.0) as i64, (origin.1 - want.1) as i64);
-        let distance = dx * dx + dy * dy;
-        if best.map_or(true, |(d, _)| distance < d) && free(origin) {
-            best = Some((distance, origin));
-        }
-    }
-    best.map_or(want, |(_, origin)| origin)
-}
-
-/// Final cells of a dropped set of loose icons: every wanted origin is clamped into the work area
-/// of the monitor under the cursor and moved to the nearest free cell if it collides with `blocked`
-/// or with an icon of the set placed before it (the order of `wanted` is the priority).
-pub(super) fn place_loose_set(wanted: &[(String, (i32, i32))], cell: (i32, i32), area: &Rect, blocked: &[Rect]) -> Vec<(String, (i32, i32))> {
-    let mut blocked = blocked.to_vec();
-    wanted
-        .iter()
-        .map(|(name, want)| {
-            let origin = nearest_free_cell(*want, cell, area, &blocked);
-            blocked.push(cell_rect(origin, cell));
-            (name.clone(), origin)
-        })
-        .collect()
-}
-
 /// Items opened at once above this count are confirmed first. Explorer's own default of the
 /// `MultipleInvokePromptMinimum` policy value is 15.
 pub(super) const DEFAULT_MULTIPLE_INVOKE_PROMPT_MINIMUM: u32 = 15;
@@ -438,22 +400,6 @@ mod tests {
 
     const CELL: (i32, i32) = (100, 80);
 
-    fn disjoint(cells: &[(i32, i32)]) -> bool {
-        cells.iter().enumerate().all(|(i, a)| cells.iter().skip(i + 1).all(|b| cell_rect(*a, CELL).overlap_area(&cell_rect(*b, CELL)) == 0))
-    }
-
-    fn inside(origin: (i32, i32), area: &Rect) -> bool {
-        origin.0 >= area.left && origin.1 >= area.top && origin.0 + CELL.0 <= area.right && origin.1 + CELL.1 <= area.bottom
-    }
-
-    fn wanted(list: &[(&str, (i32, i32))]) -> Vec<(String, (i32, i32))> {
-        list.iter().map(|(n, c)| (n.to_string(), *c)).collect()
-    }
-
-    fn cells_of(placed: &[(String, (i32, i32))]) -> Vec<(i32, i32)> {
-        placed.iter().map(|(_, c)| *c).collect()
-    }
-
     #[test]
     fn clamp_pulls_a_cell_back_into_the_area() {
         let area = Rect::new(0, 0, 1000, 800);
@@ -463,58 +409,6 @@ mod tests {
         assert_eq!(clamp_cell((5000, 5000), CELL, &area), (900, 720));
         // an area smaller than a cell pins the cell to its top-left corner
         assert_eq!(clamp_cell((50, 50), CELL, &Rect::new(10, 20, 60, 70)), (10, 20));
-    }
-
-    #[test]
-    fn drop_past_the_bottom_stays_on_screen_and_apart() {
-        let area = Rect::new(0, 0, 1000, 800);
-        // pressed icon near the bottom edge, three strangers stacked below it (loose_offsets column)
-        let placed = place_loose_set(&wanted(&[("p", (400, 700)), ("s1", (400, 780)), ("s2", (400, 860)), ("s3", (400, 940))]), CELL, &area, &[]);
-        let cells = cells_of(&placed);
-        assert!(cells.iter().all(|c| inside(*c, &area)), "{cells:?}");
-        assert!(disjoint(&cells), "{cells:?}");
-        assert_eq!(placed[0].1, (400, 700), "the first (pressed) icon keeps its cell");
-        assert_eq!(placed.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["p", "s1", "s2", "s3"]);
-    }
-
-    #[test]
-    fn drop_past_the_right_edge_stays_on_screen() {
-        let area = Rect::new(0, 0, 1000, 800);
-        let placed = place_loose_set(&wanted(&[("a", (950, 100)), ("b", (1050, 100)), ("c", (1150, 180))]), CELL, &area, &[]);
-        let cells = cells_of(&placed);
-        assert!(cells.iter().all(|c| inside(*c, &area)), "{cells:?}");
-        assert!(disjoint(&cells), "{cells:?}");
-        assert_eq!(placed[0].1, (900, 100));
-    }
-
-    #[test]
-    fn colliding_with_a_loose_icon_takes_the_nearest_free_cell() {
-        let area = Rect::new(0, 0, 1000, 800);
-        let stranger = cell_rect((300, 160), CELL);
-        let got = nearest_free_cell((310, 170), CELL, &area, &[stranger]);
-        assert!(inside(got, &area));
-        assert_eq!(cell_rect(got, CELL).overlap_area(&stranger), 0);
-        // the grid cell next to the stranger, not one across the screen
-        assert!((got.0 - 310).abs() <= 200 && (got.1 - 170).abs() <= 160, "{got:?}");
-        // a free wanted cell is used as it is, off the grid
-        assert_eq!(nearest_free_cell((517, 333), CELL, &area, &[stranger]), (517, 333));
-    }
-
-    #[test]
-    fn colliding_with_a_group_rect_moves_out_of_it() {
-        let area = Rect::new(0, 0, 1000, 800);
-        let group = Rect::new(0, 0, 450, 800); // a tall group on the left half
-        let placed = place_loose_set(&wanted(&[("a", (100, 100)), ("b", (100, 180))]), CELL, &area, &[group]);
-        let cells = cells_of(&placed);
-        assert!(cells.iter().all(|c| inside(*c, &area) && cell_rect(*c, CELL).overlap_area(&group) == 0), "{cells:?}");
-        assert!(disjoint(&cells));
-        assert_eq!(cells[0].0, 500, "the nearest grid column right of the group");
-    }
-
-    #[test]
-    fn a_crowded_area_keeps_the_clamped_cell_instead_of_leaving_it() {
-        let area = Rect::new(0, 0, 200, 160);
-        assert_eq!(nearest_free_cell((500, 500), CELL, &area, &[area]), (100, 80));
     }
 
     #[test]
@@ -529,12 +423,6 @@ mod tests {
         assert_eq!(monitor_index_at((-3000, 400), &bounds), Some(1));
         assert_eq!(monitor_index_at((5000, 5000), &bounds), Some(0));
         assert_eq!(monitor_index_at((0, 0), &[]), None);
-        // a set dropped with the cursor on the left monitor lands inside that monitor's work area
-        let work = Rect::new(-1280, 0, 0, 984); // taskbar at the bottom
-        let placed = place_loose_set(&wanted(&[("a", (-50, 900)), ("b", (-50, 980)), ("c", (30, 100))]), CELL, &work, &[]);
-        let cells = cells_of(&placed);
-        assert!(cells.iter().all(|c| inside(*c, &work)), "{cells:?}");
-        assert!(disjoint(&cells));
     }
 
     #[test]

@@ -300,6 +300,16 @@ impl App {
     /// cached value) and converts the pixels with the view's own DPI, not the first monitor's. True when
     /// the cell inputs changed (the caller then reloads items).
     pub(super) fn refresh_icon_metrics(&mut self) -> bool {
+        self.refresh_icon_metrics_with_clamp(true)
+    }
+
+    /// An unchanged settings poll has no geometry edit to clamp. All event/reload callers
+    /// keep the unconditional clamp in `refresh_icon_metrics`.
+    pub(super) fn refresh_icon_metrics_on_timer(&mut self) -> bool {
+        self.refresh_icon_metrics_with_clamp(false)
+    }
+
+    fn refresh_icon_metrics_with_clamp(&mut self, clamp_unchanged: bool) -> bool {
         // Fixture previews must never sample the user's Desktop.
         let fixture = self.opts.mode == super::Mode::Preview && std::env::var_os("CORRAL_QA_ITEMS_DIR").is_some();
         let sample_dpi = self.desktop_sample_dpi();
@@ -319,7 +329,7 @@ impl App {
         self.desktop_metrics = next;
         // Geometry, scroll limits and drawing must use the same new cell. Keep the model's expanded
         // rectangle (especially rolled groups) intact.
-        self.clamp_metric_scrolls();
+        if changed || clamp_unchanged { self.clamp_metric_scrolls(); }
         changed
     }
 

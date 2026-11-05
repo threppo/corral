@@ -18,8 +18,6 @@ use crate::snapshot::{self, Action, Request, RequestResult};
 pub const LINK_TEXT: &str = "Save / Restore a backup";
 /// Text of the capture button.
 pub const SAVE_TEXT: &str = "Save backup";
-/// Section header that hosts the list.
-pub const SECTION: &str = "Saved backups";
 /// Key of the "never ask again" tip in `Settings::tips` (stored as `Tips\SnapshotBeforeRestore`).
 pub const TIP_KEY: &str = "SnapshotBeforeRestore";
 /// Value stored for it.
@@ -34,8 +32,6 @@ pub const STILL_WORKING_MESSAGE: &str =
     "Corral is still working on the request. Check the backup list in a moment.";
 pub const TIMEOUT_MESSAGE: &str = "Corral did not answer within 10 seconds. The backup request was not completed. Make sure Corral is running and try again.";
 pub const EMPTY_TEXT: &str = "No backups yet. Save one to keep your current layout.";
-pub const NAME_EMPTY: &str = "Enter a name.";
-pub const NAME_TOO_LONG: &str = "Use 255 characters or fewer.";
 
 /// One backup as shown in the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,29 +123,6 @@ pub fn format_taken(created_ms: u64) -> String {
         return format!("{created_ms}");
     }
     format_taken_parts(local.year, local.month, local.day, local.hour, local.minute)
-}
-
-/// Verdict of the rename / naming dialog on the typed text.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TitleCheck {
-    Valid,
-    /// Same raw title as before: accepted, nothing to rename.
-    Unchanged,
-    Invalid(&'static str),
-}
-
-pub fn validate_title(raw: &str, original: &str) -> TitleCheck {
-    if raw.trim().is_empty() {
-        return TitleCheck::Invalid(NAME_EMPTY);
-    }
-    if raw.chars().count() > 255 {
-        return TitleCheck::Invalid(NAME_TOO_LONG);
-    }
-    if raw == original {
-        TitleCheck::Unchanged
-    } else {
-        TitleCheck::Valid
-    }
 }
 
 pub fn new_request(nonce: u64, action: Action) -> Request {
@@ -326,11 +299,6 @@ fn sc(v: f32, dpi: u32) -> f32 {
     (v * dpi as f32 / 96.0).round()
 }
 
-/// A list has one row per backup at every supported width.
-pub fn columns(_inner_w: f32, _dpi: u32) -> usize {
-    1
-}
-
 #[derive(Clone, Debug)]
 struct RowMetrics {
     /// Unscaled cumulative offset and height; snap the final boundaries once.
@@ -476,16 +444,6 @@ pub fn tile_rect(index: usize, x: f32, y: f32, inner_w: f32, dpi: u32) -> RectF 
     })
 }
 
-pub fn tile_at(
-    point: (f32, f32),
-    count: usize,
-    x: f32,
-    y: f32,
-    inner_w: f32,
-    dpi: u32,
-) -> Option<usize> {
-    (0..count).find(|&i| contains(tile_rect(i, x, y, inner_w, dpi), point))
-}
 fn contains(r: RectF, p: (f32, f32)) -> bool {
     p.0 >= r.left && p.0 < r.right && p.1 >= r.top && p.1 < r.bottom
 }
@@ -557,21 +515,6 @@ pub fn menu_action(index: usize) -> Option<MenuAction> {
     [MenuAction::Rename, MenuAction::Update, MenuAction::Delete]
         .get(index)
         .copied()
-}
-impl MenuAction {
-    /// Rename requires a separately validated title. No store is opened or mutated here.
-    pub fn request(self, id: &str, title: Option<String>) -> Option<Action> {
-        match self {
-            Self::Rename => title
-                .filter(|v| matches!(validate_title(v, ""), TitleCheck::Valid))
-                .map(|title| Action::Rename {
-                    id: id.into(),
-                    title,
-                }),
-            Self::Update => Some(Action::Recapture { id: id.into() }),
-            Self::Delete => Some(Action::Delete { id: id.into() }),
-        }
-    }
 }
 pub fn subtitle(tile: &Tile) -> String {
     format!(
@@ -776,29 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn title_validation_uses_the_expected_texts() {
-        assert_eq!(validate_title("  ", "Old"), TitleCheck::Invalid(NAME_EMPTY));
-        assert_eq!(validate_title("", ""), TitleCheck::Invalid(NAME_EMPTY));
-        assert_eq!(
-            validate_title(&"a".repeat(256), "Old"),
-            TitleCheck::Invalid(NAME_TOO_LONG)
-        );
-        assert_eq!(validate_title(&"a".repeat(254), "Old"), TitleCheck::Valid);
-        assert_eq!(validate_title("Old", "Old"), TitleCheck::Unchanged);
-        // Raw text is kept verbatim: surrounding blanks make it a different title.
-        assert_eq!(validate_title(" Old", "Old"), TitleCheck::Valid);
-        // Count Unicode characters, not UTF-16 surrogate units.
-        assert_eq!(
-            validate_title(&"\u{1F600}".repeat(255), "x"),
-            TitleCheck::Valid
-        );
-        assert_eq!(
-            validate_title(&"\u{1F600}".repeat(256), "x"),
-            TitleCheck::Invalid(NAME_TOO_LONG)
-        );
-    }
-
-    #[test]
     fn tiles_sort_newest_first_by_timestamp() {
         let mk = |id: &str, ms: u64, kind: snapshot::Kind| snapshot::Snapshot {
             version: snapshot::VERSION,
@@ -899,7 +819,6 @@ mod tests {
         collapse();
         for dpi in [96u32, 120, 144, 240] {
             let width = sc(398.0, dpi);
-            assert_eq!(columns(width, dpi), 1);
             for count in 1..50 {
                 assert_eq!(
                     tile_rect(count - 1, sc(17.0, dpi), 0.0, width, dpi).bottom,
@@ -956,22 +875,6 @@ mod tests {
         assert_eq!(menu_action(1), Some(MenuAction::Update));
         assert_eq!(menu_action(2), Some(MenuAction::Delete));
         assert_eq!(menu_action(3), None);
-        assert_eq!(
-            MenuAction::Update.request("id", None),
-            Some(Action::Recapture { id: "id".into() })
-        );
-        assert_eq!(
-            MenuAction::Delete.request("id", None),
-            Some(Action::Delete { id: "id".into() })
-        );
-        assert!(MenuAction::Rename.request("id", Some(" ".into())).is_none());
-        assert_eq!(
-            MenuAction::Rename.request("id", Some("New".into())),
-            Some(Action::Rename {
-                id: "id".into(),
-                title: "New".into()
-            })
-        );
         let mut tile = Tile {
             id: "x".into(),
             title: "Daily backup".into(),

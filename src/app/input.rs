@@ -509,7 +509,12 @@ impl App {
     }
 
     fn set_selected(&mut self, name: &str, on: bool) {
-        if on && !self.name_actionable(name) {
+        let covered = if on { self.covered_loose_set() } else { Default::default() };
+        self.set_selected_in(name, on, &covered);
+    }
+
+    fn set_selected_in(&mut self, name: &str, on: bool, covered: &std::collections::HashSet<String>) {
+        if on && !self.name_actionable_in(name, covered) {
             return;
         }
         if let Some(item) = self.items.iter_mut().find(|i| i.shell.parsing_name.eq_ignore_ascii_case(name)) {
@@ -597,7 +602,8 @@ impl App {
             return super::covered_icons::drag_names(pressed, &self.pages.drag_names, |n| !self.loose_name_covered(n));
         }
         let selected = self.selected_in_display_order();
-        super::covered_icons::drag_names(pressed, &selected, |n| self.name_actionable(n))
+        let covered = self.covered_loose_set();
+        super::covered_icons::drag_names(pressed, &selected, |n| self.name_actionable_in(n, &covered))
     }
 
     /// The selected items that fit one shell menu with `pressed`: they must share its parent folder
@@ -646,8 +652,9 @@ impl App {
                         if !add {
                             self.clear_selection();
                         }
+                        let covered = self.covered_loose_set();
                         for member in &span {
-                            self.set_selected(member, true);
+                            self.set_selected_in(member, true, &covered);
                         }
                     }
                     // no anchor in this container: the clicked item starts a new range
@@ -812,7 +819,8 @@ impl App {
                     if self.selection.anchor.is_none() { self.selection.anchor = Some(order[at].clone()); }
                     let span = self.selection.anchor.as_deref().and_then(|anchor| selection::range(&order, anchor, &order[slot])).unwrap_or(&order[slot..=slot]).to_vec();
                     if !ctrl { self.clear_selection(); }
-                    for name in span { self.set_selected(&name, true); }
+                    let covered = self.covered_loose_set();
+                    for name in span { self.set_selected_in(&name, true, &covered); }
                 } else if !ctrl {
                     self.clear_selection();
                     self.set_selected(&order[slot], true);
@@ -876,9 +884,13 @@ impl App {
 
     /// Marks `band_base` plus the items of `hits` (indices into `items`) as selected.
     fn select_band(&mut self, hits: &[usize]) {
-        let base = std::mem::take(&mut self.selection.band_base);
         let covered = self.covered_loose_set();
         let actionable: Vec<bool> = self.items.iter().map(|i| self.name_actionable_in(&i.shell.parsing_name, &covered)).collect();
+        self.select_band_in(hits, &actionable);
+    }
+
+    fn select_band_in(&mut self, hits: &[usize], actionable: &[bool]) {
+        let base = std::mem::take(&mut self.selection.band_base);
         for (k, item) in self.items.iter_mut().enumerate() {
             item.selected = actionable[k] && (hits.contains(&k) || base.contains(&item.shell.parsing_name.to_lowercase()));
         }
@@ -891,15 +903,16 @@ impl App {
         let band = Rect::from_points(start.0, start.1, current.0, current.1);
         let (cw, ch) = self.loose_cell();
         let covered = self.covered_loose_set();
+        let actionable: Vec<bool> = self.items.iter().map(|i| self.name_actionable_in(&i.shell.parsing_name, &covered)).collect();
         let cells: Vec<(usize, Rect)> = self
             .items
             .iter()
             .enumerate()
-            .filter(|(_, i)| self.group_of(&i.shell.parsing_name).is_none() && self.name_actionable_in(&i.shell.parsing_name, &covered))
+            .filter(|(k, i)| self.group_of(&i.shell.parsing_name).is_none() && actionable[*k])
             .map(|(k, i)| (k, Rect::new(i.pos.0, i.pos.1, i.pos.0 + cw, i.pos.1 + ch)))
             .collect();
         let hits = selection::band_hits(band, &cells);
-        self.select_band(&hits);
+        self.select_band_in(&hits, &actionable);
         self.repaint_selection(&before, true, None);
     }
 

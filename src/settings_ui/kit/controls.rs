@@ -17,36 +17,22 @@ pub enum ButtonStyle {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
-    Nav,
-    GroupLabel,
-    PageHeader,
-    SectionLabel,
-    Card,
-    SettingRow,
     Toggle,
     Checkbox,
     Radio,
-    RadioRow,
-    CheckRow,
     Button(ButtonStyle),
     IconButton,
     Link,
     Dropdown,
-    Menu,
-    MenuItem,
     Segmented,
     Slider,
     StepSlider,
-    SliderRow,
     ValueChip,
     Swatch,
     CustomSwatch,
     AutoSwatch,
-    ColorRow,
     Stepper,
-    InfoBox,
     WarningBox,
-    Expander,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct VisualState {
@@ -96,7 +82,7 @@ pub fn hit_control(
             .position(|part| contains(*part, x_px, y_px))
             .map(|part| Hit { part });
     }
-    let split = matches!(kind, Control::Segmented | Control::ColorRow);
+    let split = kind == Control::Segmented;
     let part = if split && parts > 0 {
         (((x_px - r.left) / (r.right - r.left) * parts as f32).floor() as usize).min(parts - 1)
     } else {
@@ -129,35 +115,9 @@ pub fn slider_ticks(bounds: RectF, dpi: u32) -> [RectF; 5] {
 }
 
 pub fn interactive(kind: Control) -> bool {
-    !matches!(
-        kind,
-        Control::GroupLabel
-            | Control::PageHeader
-            | Control::SectionLabel
-            | Control::Card
-            | Control::Menu
-            | Control::SliderRow
-            | Control::ValueChip
-            | Control::InfoBox
-            | Control::WarningBox
-    )
+    !matches!(kind, Control::ValueChip | Control::WarningBox)
 }
-pub fn preferred_size(kind: Control) -> (f32, f32) {
-    match kind {
-        Control::Nav => (224., 36.),
-        Control::Toggle => (40., 20.),
-        Control::Checkbox | Control::Radio => (20., 20.),
-        Control::IconButton => (32., 32.),
-        Control::Dropdown => (220., 32.),
-        Control::Slider => (240., 24.),
-        Control::StepSlider => (240., 32.),
-        Control::Swatch | Control::CustomSwatch | Control::AutoSwatch => (28., 28.),
-        Control::ValueChip => (72., 24.),
-        Control::Expander => (220., 48.),
-        Control::Stepper => (104., 32.),
-        _ => (80., 32.),
-    }
-}
+
 fn text(
     ctx: &Ctx,
     label: &str,
@@ -189,10 +149,6 @@ pub fn draw_control(
     let hover = state.hovered || state.pressed;
     let radius = 4. * s;
     let (fill, border) = match kind {
-        Control::Card | Control::Menu | Control::Expander => {
-            (Some(theme.surface), Some(theme.border))
-        }
-        Control::InfoBox => (Some(theme.surface_raised), None),
         Control::WarningBox => (Some(theme.accent_subtle), None),
         Control::Button(ButtonStyle::Primary) => (
             Some(if hover {
@@ -217,20 +173,7 @@ pub fn draw_control(
         ),
         Control::Segmented => (Some(theme.surface_raised), Some(theme.border)),
         Control::ValueChip => (Some(theme.subtle_selected), None),
-        Control::Nav | Control::MenuItem => (
-            if state.selected {
-                Some(theme.subtle_selected)
-            } else if hover {
-                Some(theme.subtle_hover)
-            } else {
-                None
-            },
-            None,
-        ),
-        Control::SettingRow
-        | Control::RadioRow
-        | Control::CheckRow
-        | Control::Button(ButtonStyle::Subtle)
+        Control::Button(ButtonStyle::Subtle)
         | Control::IconButton => (
             if hover {
                 Some(theme.subtle_hover)
@@ -243,7 +186,7 @@ pub fn draw_control(
     };
     let rad = if matches!(
         kind,
-        Control::Card | Control::Menu | Control::InfoBox | Control::WarningBox | Control::Expander
+        Control::WarningBox
     ) {
         8. * s
     } else {
@@ -476,25 +419,14 @@ pub fn draw_control(
             ctx.draw_text_cached("\u{E70D}", RectF::new(r.right - 24. * s, r.top, r.right - 8. * s, r.bottom), &chevron)?;
         }
         _ => {
-            if matches!(kind, Control::Nav | Control::MenuItem) && state.selected {
-                ctx.fill_rounded_rect(
-                    RectF::new(r.left, mid_y - 8. * s, r.left + 3. * s, mid_y + 8. * s),
-                    1.5 * s,
-                    c(theme.accent),
-                )?;
-            }
             let ty = match kind {
-                Control::PageHeader => Type::PageTitle,
-                Control::SectionLabel => Type::Section,
-                Control::GroupLabel => Type::Group,
                 Control::ValueChip => Type::Caption,
-                Control::Nav | Control::MenuItem if state.selected => Type::BodyStrong,
                 _ => Type::Body,
             };
             let foreground = match kind {
                 Control::Button(ButtonStyle::Primary | ButtonStyle::Danger) => theme.on_accent,
                 Control::Link => theme.link,
-                Control::GroupLabel | Control::ValueChip => theme.secondary,
+                Control::ValueChip => theme.secondary,
                 _ => theme.text,
             };
             let align = if matches!(kind, Control::Button(_) | Control::IconButton) {
@@ -509,7 +441,7 @@ pub fn draw_control(
                 label,
                 if kind==Control::ValueChip {
                     RectF::new(r.left+8.*s,r.top,r.right-8.*s,r.bottom)
-                }else{inset(r,if matches!(kind,Control::PageHeader|Control::SectionLabel){0.}else{8.*s})},
+                }else{inset(r, 8.*s)},
                 ty,
                 dpi,
                 c(foreground),
@@ -533,21 +465,6 @@ pub fn draw_control(
         ctx.stroke_rounded_rect(ring, rad + 3. * s, 2. * s, theme.focus)?;
     }
     Ok(())
-}
-/// Compose the model with the appropriate primitive; preserve its unsnapped drag fraction.
-pub fn draw_slider_model(
-    ctx: &Ctx,
-    bounds: RectF,
-    model: &super::slider::SliderModel,
-    state: VisualState,
-    theme: &Theme,
-    dpi: u32,
-) -> Result<()> {
-    let kind = match &model.scale {
-        super::slider::SliderScale::Steps(_) => Control::StepSlider,
-        super::slider::SliderScale::Continuous { .. } => Control::Slider,
-    };
-    draw_control(ctx, kind, bounds, "", state, theme, dpi, model.fraction)
 }
 
 /// Equal segment widths are based on the widest measured label, never truncate a label.
@@ -632,106 +549,17 @@ pub fn draw_segmented(
     }
     Ok(())
 }
-pub fn draw_swatch(
-    ctx: &Ctx,
-    bounds: RectF,
-    color: Rgba,
-    kind: Control,
-    state: VisualState,
-    theme: &Theme,
-    dpi: u32,
-) -> Result<()> {
-    let x = (bounds.left + bounds.right) / 2.;
-    let y = (bounds.top + bounds.bottom) / 2.;
-    let r = snap_rect(RectF::new(x - 10., y - 10., x + 10., y + 10.), dpi);
-    ctx.fill_rounded_rect(r, 10. * dpi as f32 / 96., theme.color(color, state.enabled))?;
-    if kind == Control::CustomSwatch {
-        // Dashed 2-on/2-off edge approximated by short circular chords, with no native control.
-        let scale = dpi as f32 / 96.;
-        let center = ((r.left + r.right) / 2., (r.top + r.bottom) / 2.);
-        for i in 0..16 {
-            let angle = i as f32 * std::f32::consts::TAU / 16.;
-            let cx = center.0 + 10. * scale * angle.cos();
-            let cy = center.1 + 10. * scale * angle.sin();
-            ctx.fill_rounded_rect(
-                RectF::new(
-                    cx - scale * 0.7,
-                    cy - scale * 0.7,
-                    cx + scale * 0.7,
-                    cy + scale * 0.7,
-                ),
-                scale * 0.7,
-                theme.color(theme.control_strong, state.enabled),
-            )?;
-        }
-        text(
-            ctx,
-            "+",
-            r,
-            Type::Caption,
-            dpi,
-            theme.color(theme.control_strong, state.enabled),
-            Align::Center,
-        )?;
-    } else {
-        ctx.stroke_rounded_rect(
-            r,
-            10. * dpi as f32 / 96.,
-            dpi as f32 / 96.,
-            theme.color(theme.border_strong, state.enabled),
-        )?;
-    }
-    if state.selected || state.hovered {
-        ctx.stroke_rounded_rect(
-            snap_rect(bounds, dpi),
-            14. * dpi as f32 / 96.,
-            if state.selected { 2. } else { 1. } * dpi as f32 / 96.,
-            theme.color(
-                if state.selected {
-                    theme.text
-                } else {
-                    theme.border_strong
-                },
-                state.enabled,
-            ),
-        )?;
-    }
-    Ok(())
-}
-/// Card dividers are inset 16 DIPs and omit the last row by construction.
-pub fn draw_dividers(
-    ctx: &Ctx,
-    card: RectF,
-    row_bottoms: &[f32],
-    theme: &Theme,
-    dpi: u32,
-) -> Result<()> {
-    for y in row_bottoms.iter().take(row_bottoms.len().saturating_sub(1)) {
-        let r = snap_rect(
-            RectF::new(card.left + 16., *y, card.right - 16., *y + 1.),
-            dpi,
-        );
-        ctx.fill_rect(r, theme.border_subtle)?;
-    }
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn every_control_has_consistent_dpi_hit_targets_and_disabled_state() {
         let all = [
-            Control::Nav,
-            Control::GroupLabel,
-            Control::PageHeader,
-            Control::SectionLabel,
-            Control::Card,
-            Control::SettingRow,
+
             Control::Toggle,
             Control::Checkbox,
             Control::Radio,
-            Control::RadioRow,
-            Control::CheckRow,
+
             Control::Button(ButtonStyle::Primary),
             Control::Button(ButtonStyle::Secondary),
             Control::Button(ButtonStyle::Subtle),
@@ -739,21 +567,20 @@ mod tests {
             Control::IconButton,
             Control::Link,
             Control::Dropdown,
-            Control::Menu,
-            Control::MenuItem,
+
             Control::Segmented,
             Control::Slider,
             Control::StepSlider,
-            Control::SliderRow,
+
             Control::ValueChip,
             Control::Swatch,
             Control::CustomSwatch,
             Control::AutoSwatch,
-            Control::ColorRow,
+
             Control::Stepper,
-            Control::InfoBox,
+
             Control::WarningBox,
-            Control::Expander,
+
         ];
         for dpi in [96, 120, 144, 240] {
             for kind in all {
@@ -803,7 +630,6 @@ mod tests {
     #[test]
     fn u1_fix_stepped_slider_draws_five_ticks_below_continuous_track() -> Result<()> {
         use crate::render::Surface;
-        assert_eq!(preferred_size(Control::StepSlider), (240.0, 32.0));
         for dpi in [96, 120, 144, 240] {
             for light in [true, false] {
                 let theme = Theme::new(light);
@@ -811,14 +637,7 @@ mod tests {
                 let mut surface = Surface::new(snap(280.0, dpi) as u32, snap(60.0, dpi) as u32)?;
                 surface.draw(|ctx| {
                     ctx.clear(theme.window);
-                    {
-                        let mut model = super::super::slider::SliderModel::new(
-                            super::super::slider::SliderScale::Steps(vec![0, 15, 30, 60, 120]),
-                            30,
-                        );
-                        model.drag(0.37, 0.0, 1.0);
-                        draw_slider_model(ctx, bounds, &model, VisualState::default(), &theme, dpi)
-                    }
+                    draw_control(ctx, Control::StepSlider, bounds, "", VisualState::default(), &theme, dpi, 0.37)
                 })?;
                 for tick in slider_ticks(bounds, dpi) {
                     let x = ((tick.left + tick.right) / 2.0) as usize;
@@ -843,7 +662,7 @@ mod tests {
         let output = std::path::Path::new("target/qa/settings-redesign/u1");
         std::fs::create_dir_all(output).expect("create QA output");
         let kinds = [
-            Control::Nav,
+
             Control::Toggle,
             Control::Checkbox,
             Control::Radio,
@@ -854,7 +673,7 @@ mod tests {
             Control::IconButton,
             Control::Link,
             Control::Dropdown,
-            Control::MenuItem,
+
             Control::Segmented,
             Control::Slider,
             Control::StepSlider,
@@ -862,9 +681,9 @@ mod tests {
             Control::CustomSwatch,
             Control::AutoSwatch,
             Control::Stepper,
-            Control::InfoBox,
+
             Control::WarningBox,
-            Control::Expander,
+
         ];
         for dpi in [96, 120, 144, 240] {
             for light in [true, false] {
@@ -897,8 +716,18 @@ mod tests {
                                 enabled: col != 4,
                                 focused: col == 5,
                             };
-                            let (mut w, h) = preferred_size(*kind);
-                            if matches!(kind, Control::Link | Control::MenuItem) {
+                            let (mut w, h): (f32, f32) = match kind {
+                                Control::Toggle => (40., 20.),
+                                Control::Checkbox | Control::Radio => (20., 20.),
+                                Control::IconButton => (32., 32.),
+                                Control::Dropdown => (220., 32.),
+                                Control::Slider => (240., 24.),
+                                Control::StepSlider => (240., 32.),
+                                Control::Swatch | Control::CustomSwatch | Control::AutoSwatch => (28., 28.),
+                                Control::Stepper => (104., 32.),
+                                _ => (80., 32.),
+                            };
+                            if matches!(kind, Control::Link) {
                                 w = 160.;
                             }
                             if *kind == Control::Segmented {
@@ -910,9 +739,6 @@ mod tests {
                                 Control::Button(_) => "Button",
                                 Control::IconButton => "+",
                                 Control::Dropdown => "Dropdown",
-                                Control::Nav => "Backups",
-                                Control::MenuItem => "Menu item",
-                                Control::Expander => "How it works",
                                 Control::Link => "Open folder",
                                 Control::Stepper => "55",
                                 _ => "Control",
@@ -931,30 +757,7 @@ mod tests {
                                 )?;
                                 continue;
                             }
-                            if *kind == Control::Swatch {
-                                draw_swatch(
-                                    ctx,
-                                    bounds,
-                                    Rgba::new(185, 122, 51, 255),
-                                    *kind,
-                                    state,
-                                    &theme,
-                                    dpi,
-                                )?;
-                                continue;
-                            }
-                            if *kind == Control::StepSlider {
-                                let mut model = super::super::slider::SliderModel::new(
-                                    super::super::slider::SliderScale::Steps(vec![
-                                        0, 15, 30, 60, 120,
-                                    ]),
-                                    30,
-                                );
-                                model.drag(0.43, 0.0, 1.0);
-                                draw_slider_model(ctx, bounds, &model, state, &theme, dpi)?;
-                            } else {
-                                draw_control(ctx, *kind, bounds, label, state, &theme, dpi, 0.43)?;
-                            }
+                            draw_control(ctx, *kind, bounds, label, state, &theme, dpi, 0.43)?;
                         }
                     }
                     Ok(())

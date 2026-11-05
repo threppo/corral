@@ -294,16 +294,8 @@ settings_storage_schema! {
     pub tabs_always_show_colors: bool,
     #[serde(rename = "TabsColoredPerTabInSegmentView")]
     pub tabs_colored_per_tab_in_segment_view: bool,
-    /// Retired (corral-painting-spec 7): read so old files load, never written or acted on.
-    #[serde(rename = "TabsDimNonSelectedTabOnMouseover", skip_serializing)]
-    #[allow(dead_code)]
-    pub tabs_dim_nonselected_tab_on_mouseover: i32,
     #[serde(rename = "UseTitlebarControls")]
     pub use_titlebar_controls: bool,
-    /// Retired (corral-painting-spec 6, 7): read so old files load, never written or acted on.
-    #[serde(rename = "UseTitlebarControlsOnAllTabs", skip_serializing)]
-    #[allow(dead_code)]
-    pub use_titlebar_controls_on_all_tabs: bool,
 
     #[serde(rename = "TabsAllowCreateWithDrag")]
     pub tabs_allow_create_with_drag: bool,
@@ -504,9 +496,7 @@ impl Default for Settings {
             tabs_select_mouseovered_tab_when_docked: 0,
             tabs_always_show_colors: true,
             tabs_colored_per_tab_in_segment_view: false,
-            tabs_dim_nonselected_tab_on_mouseover: 0,
             use_titlebar_controls: true,
-            use_titlebar_controls_on_all_tabs: true,
             tabs_allow_create_with_drag: true,
             // Corral choice (user decision 2026-10-15): off by default
             tabs_require_confirmation: false,
@@ -559,14 +549,10 @@ pub enum Field {
     BlendColorOnActive,
     BlendUsesTintColor,
     BlendIconOpacity,
-    TintIcons,
-    TintColorMode,
     FadeInOpacity,
     FadedGroupsVisible,
     TabsStyle,
     LabelMode,
-    /// (virtual) `IconAnimationDisabled == 0`.
-    AnimateIcons,
     /// (virtual) `ScrollbarMode == 1`.
     HideScrollbars,
     InheritViewFromParent,
@@ -672,13 +658,10 @@ impl Settings {
             BlendColorOnActive => b(self.desktop_blend_color_on_active),
             BlendUsesTintColor => b(self.desktop_blend_uses_tint_icons_color),
             BlendIconOpacity => self.desktop_blend_icon_opacity as i64,
-            TintIcons => b(self.desktop_tint_icons),
-            TintColorMode => b(self.desktop_tint_icons_color_source == "custom"),
             FadeInOpacity => b(self.fade_in_opacity_on_mouseover),
             FadedGroupsVisible => b(layout_flags().any_group_faded),
             TabsStyle => self.tabs_style as i64,
             LabelMode => self.label_mode as i64,
-            AnimateIcons => b(self.icon_animation_disabled == 0),
             HideScrollbars => b(self.scrollbar_mode == 1),
             InheritViewFromParent => b(self.folder_portals_inherit_view),
             ShowInTaskbar => b(self.show_in_taskbar),
@@ -778,16 +761,10 @@ impl Settings {
             BlendColorOnActive => self.desktop_blend_color_on_active = on,
             BlendUsesTintColor => self.desktop_blend_uses_tint_icons_color = on,
             BlendIconOpacity => self.desktop_blend_icon_opacity = v.clamp(0, 255) as u8,
-            TintIcons => self.desktop_tint_icons = on,
-            TintColorMode => {
-                // camouflage-spec 5.4: choosing a mode preserves the custom swatch.
-                self.desktop_tint_icons_color_source = if v == 0 { "corral" } else { "custom" }.into();
-            }
             FadeInOpacity => self.fade_in_opacity_on_mouseover = on,
             FadedGroupsVisible | PeekWinSpaceNote | PeekToggleFallback | PeekHoldFallback | PeekHookFailed => {},
             TabsStyle => self.tabs_style = v.clamp(0, 3) as u32,
             LabelMode => self.label_mode = v.clamp(0, 2) as u32,
-            AnimateIcons => self.icon_animation_disabled = if on { 0 } else { 1 },
             HideScrollbars => self.scrollbar_mode = if on { 1 } else { 0 },
             InheritViewFromParent => self.folder_portals_inherit_view = on,
             ShowInTaskbar => self.show_in_taskbar = on,
@@ -964,7 +941,7 @@ mod q33_tests {
         let mut s: Settings = serde_json::from_str("{}").unwrap();
         assert!(s.fade_in_opacity_on_mouseover);
         assert_eq!(s.desktop_tint_icons_color, crate::color_state::TINT_COLOR_DEFAULT);
-        assert_eq!(s.transparency_factor, crate::color_state::SEE_THROUGH_DEFAULT);
+        assert_eq!(s.transparency_factor, 1380);
         s.set(Field::FadeInOpacity, 0);
         s.color = 0x00B5_6F3F;
         s.transparency_factor = 1720;
@@ -1041,7 +1018,7 @@ fn backup_path(path: &Path) -> PathBuf {
     crate::model::backup_path(path)
 }
 
-fn load_file(path: &Path) -> Option<Settings> {
+pub(crate) fn load_file(path: &Path) -> Option<Settings> {
     let text = fs::read_to_string(path).ok()?;
     round_up_store::decode(text.trim_start_matches('\u{feff}')).ok()
 }
@@ -1136,11 +1113,13 @@ mod tests {
 
     #[test]
     fn retired_tab_keys_load_from_old_files_and_are_never_written() {
-        let old: Settings = serde_json::from_str(r#"{"UseTitlebarControlsOnAllTabs": false, "TabsDimNonSelectedTabOnMouseover": 5}"#).unwrap();
-        assert!(!old.use_titlebar_controls_on_all_tabs);
-        assert_eq!(old.tabs_dim_nonselected_tab_on_mouseover, 5);
+        let old: Settings = serde_json::from_str(r#"{"UseTitlebarControlsOnAllTabs": false, "TabsDimNonSelectedTabOnMouseover": 5, "Color": 123, "TabsEnabled": false}"#).unwrap();
+        assert_eq!(old.color, 123);
+        assert!(!old.tabs_enabled);
         let written = serde_json::to_value(&old).unwrap();
         let written = written.as_object().unwrap();
+        assert_eq!(written["Color"], 123);
+        assert_eq!(written["TabsEnabled"], false);
         assert!(!written.contains_key("UseTitlebarControlsOnAllTabs"));
         assert!(!written.contains_key("TabsDimNonSelectedTabOnMouseover"));
     }
@@ -1150,6 +1129,7 @@ mod tests {
         let mut s: Settings = serde_json::from_str("{}").unwrap();
         let tabs = crate::tabs::TabSettings::from(&s);
         assert_eq!(tabs, crate::tabs::TabSettings::default());
+        s.icon_animation_disabled = 17;
         s.tabs_enabled = false;
         s.tabs_require_confirmation_uses_menu = false;
         s.tabs_select_mouseovered_tab_when_docked = 1;
@@ -1206,7 +1186,7 @@ mod tests {
         assert_eq!(s.transparency_factor, 1380);
         assert_eq!((s.color, s.text_color), (0, 0xFFFFFF));
         assert!(!s.square_edges && !s.background_blur_enabled);
-        assert!(!s.get(Field::AnimateIcons).eq(&1) && s.is_on(Field::HideScrollbars));
+        assert!(s.is_on(Field::HideScrollbars));
         // 4.1 Welcome
         assert_eq!(s.create_corral_with_mouse_mode, 0);
         assert!(s.is_on(Field::EnableCorral));
@@ -1315,8 +1295,6 @@ mod tests {
         let mut s = Settings::default();
         s.set(Field::EnableCorral, 0);
         assert!(s.disabled);
-        s.set(Field::AnimateIcons, 1);
-        assert_eq!(s.icon_animation_disabled, 0);
         s.set(Field::HideScrollbars, 0);
         assert_eq!(s.scrollbar_mode, 0);
         s.set(Field::AutoHideIdle, 1);
@@ -1557,17 +1535,13 @@ mod camouflage_storage_tests {
     }
 
     #[test]
-    fn explicit_source_wins_and_mode_selection_preserves_custom_colour() {
+    fn explicit_source_wins_over_the_retired_switch() {
         for source in ["corral", "custom"] {
-            let mut value: Settings = serde_json::from_value(serde_json::json!({
+            let value: Settings = serde_json::from_value(serde_json::json!({
                 "DesktopTintIconsColorSource":source, "DesktopTintIconsColorUse": 7,
                 "DesktopTintIconsColor": 0x010203, "Color": 0x112233,
                 "CamouflageAlgorithm": 1})).unwrap(); // the retired switch is ignored
             assert_eq!(value.desktop_tint_icons_color_source, source);
-            value.set(Field::TintColorMode, 0);
-            assert_eq!(value.desktop_tint_icons_color_source, "corral");
-            value.set(Field::TintColorMode, 1);
-            assert_eq!(value.desktop_tint_icons_color_source, "custom");
             assert_eq!(value.desktop_tint_icons_color, 0x010203);
         }
     }

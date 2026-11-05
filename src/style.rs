@@ -3,13 +3,6 @@
 
 use crate::render::Rgba;
 
-/// Corner radius. PROVISIONAL.
-pub const CORNER_RADIUS: f32 = 4.0;
-/// Group body fill. PROVISIONAL (dark translucent).
-pub const BODY_COLOR: Rgba = Rgba::new(16, 16, 16, 110);
-/// Title band fill. PROVISIONAL.
-pub const TITLE_COLOR: Rgba = Rgba::new(0, 0, 0, 150);
-pub const TITLE_TEXT: Rgba = Rgba::new(255, 255, 255, 255);
 pub const TITLE_FONT_PX: f32 = 15.0;
 /// Desktop icon edge in DIPs when the desktop's own size is unknown: Windows' medium icons
 /// (grid-snapping-spec 2.2). The grid itself comes from `icon_metrics::cell_metrics`, never from a constant here.

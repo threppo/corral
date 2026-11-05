@@ -142,7 +142,7 @@ pub fn decode_stored(stored: u32) -> Stored {
     }
 }
 
-#[allow(dead_code)] // the dropdown writes the table values; the tests check the round trip
+#[cfg(test)]
 pub fn encode(c: Combo) -> u32 {
     let key = if c.key == VK_TILDE { STORED_TILDE } else { c.key };
     ((c.mods as u32) << 16) | key
@@ -210,10 +210,6 @@ pub struct KeyEvent {
     pub vk: u32,
     pub scan: u32,
     pub down: bool,
-    /// Injected by another process: treated like a physical key (peek-hotkeys-spec 5), so the engine reads
-    /// nothing from it; the field documents the policy and lets the tests feed injected streams.
-    #[allow(dead_code)]
-    pub injected: bool,
     /// Carries Corral's own marker: ignored entirely.
     pub marker: bool,
 }
@@ -344,12 +340,12 @@ impl HotkeyEngine {
         m
     }
 
-    #[allow(dead_code)] // statistics and test probes
+    #[cfg(test)]
     pub fn consumed_is_empty(&self) -> bool {
         self.consumed.is_empty()
     }
 
-    #[allow(dead_code)] // statistics and test probes
+    #[cfg(test)]
     pub fn tracking_is_empty(&self) -> bool {
         self.mods_down.is_empty() && self.keys_down.is_empty()
     }
@@ -370,12 +366,12 @@ impl HotkeyEngine {
         std::mem::take(&mut self.slow)
     }
 
-    #[allow(dead_code)] // statistics and test probes
+    #[cfg(test)]
     pub fn callbacks_over_budget(&self) -> u32 {
         self.over_budget
     }
 
-    #[allow(dead_code)] // statistics and test probes
+    #[cfg(test)]
     pub fn max_callback_us(&self) -> u64 {
         self.max_callback_us
     }
@@ -629,7 +625,7 @@ fn step_key(kb: &KBDLLHOOKSTRUCT, message: u32) -> bool {
         ctx.engine.set_peek_visible(ctx.shared.peek_visible.load(Ordering::Relaxed));
         ctx.engine.set_fullscreen(ctx.shared.fullscreen.load(Ordering::Relaxed));
         let now = ctx.base.elapsed().as_micros() as u64;
-        let ev = KeyEvent { vk: kb.vkCode, scan: kb.scanCode, down: !up, injected: kb.flags.0 & 0x12 != 0, marker: false };
+        let ev = KeyEvent { vk: kb.vkCode, scan: kb.scanCode, down: !up, marker: false };
         let was_holding = ctx.engine.hold_active();
         let out = ctx.engine.on_key(ev, now, &SystemKeys);
         if let Some(e) = out.emit {
@@ -971,9 +967,9 @@ mod tests {
             Rig { engine: HotkeyEngine::new(cfg), phys: Phys(KeySet::default()), now: 1_000_000, emits: Vec::new(), masks: 0 }
         }
 
-        fn raw(&mut self, vk: u32, down: bool, scan: u32, injected: bool, marker: bool) -> Out {
+        fn raw(&mut self, vk: u32, down: bool, scan: u32, marker: bool) -> Out {
             self.now += 10_000;
-            let out = self.engine.on_key(KeyEvent { vk, scan, down, injected, marker }, self.now, &self.phys);
+            let out = self.engine.on_key(KeyEvent { vk, scan, down, marker }, self.now, &self.phys);
             // The system key state of the event being processed is updated after the hook returns, and a
             // consumed event never updates it.
             if !marker && !out.consume {
@@ -989,11 +985,11 @@ mod tests {
         }
 
         fn down(&mut self, vk: u32) -> Out {
-            self.raw(vk, true, 0, false, false)
+            self.raw(vk, true, 0, false)
         }
 
         fn up(&mut self, vk: u32) -> Out {
-            self.raw(vk, false, 0, false, false)
+            self.raw(vk, false, 0, false)
         }
 
         fn wait(&mut self, ms: u64) {
@@ -1042,7 +1038,7 @@ mod tests {
         for cfg in [off, none] {
             let mut r = Rig::new(cfg);
             for (vk, down) in [(LWIN, true), (SPACE, true), (SPACE, false), (LWIN, false), (LCTRL, true), (ESC, true), (ESC, false)] {
-                assert_eq!(r.raw(vk, down, 0, false, false), Out::default());
+                assert_eq!(r.raw(vk, down, 0, false), Out::default());
             }
             assert!(r.emits.is_empty() && r.masks == 0);
         }
@@ -1203,16 +1199,16 @@ mod tests {
         let cfg = Config { enabled: true, toggle: Some(combo(MOD_CTRL | MOD_ALT, SPACE)), hold: None };
         // AltGr+Space: fake Ctrl (scan 0x21D), Right Alt, Space
         let mut r = Rig::new(cfg);
-        assert_eq!(r.raw(LCTRL, true, ALTGR_FAKE_CTRL_SCAN, false, false), Out::default());
+        assert_eq!(r.raw(LCTRL, true, ALTGR_FAKE_CTRL_SCAN, false), Out::default());
         r.down(RALT);
         assert_eq!(r.down(SPACE), Out::default());
         r.up(SPACE);
-        r.raw(LCTRL, false, ALTGR_FAKE_CTRL_SCAN, false, false);
+        r.raw(LCTRL, false, ALTGR_FAKE_CTRL_SCAN, false);
         r.up(RALT);
         assert!(r.engine.tracking_is_empty());
         // real Ctrl+Alt+Space
         let mut r = Rig::new(cfg);
-        r.raw(LCTRL, true, 0x1D, false, false);
+        r.raw(LCTRL, true, 0x1D, false);
         r.down(LALT);
         let o = r.down(SPACE);
         assert_eq!((o.consume, o.emit, o.mask), (true, Some(Emit::Toggle), true));
@@ -1326,26 +1322,26 @@ mod tests {
     }
 
     #[test]
-    fn injected_input_counts_but_the_marker_never_does() {
-        // other injected events behave like physical keys
+    fn ordinary_input_counts_but_the_marker_never_does() {
+        // Ordinary events reach the engine without an injection flag.
         let mut r = Rig::new(default_cfg());
-        r.raw(LWIN, true, 0, true, false);
-        let o = r.raw(SPACE, true, 0, true, false);
+        r.raw(LWIN, true, 0, false);
+        let o = r.raw(SPACE, true, 0, false);
         assert!(o.consume && o.emit == Some(Emit::Toggle));
-        assert!(r.raw(SPACE, false, 0, true, false).consume);
-        r.raw(LWIN, false, 0, true, false);
-        // an injected up whose down was not consumed passes
+        assert!(r.raw(SPACE, false, 0, false).consume);
+        r.raw(LWIN, false, 0, false);
+        // An up whose down was not consumed passes.
         let mut r = Rig::new(default_cfg());
-        assert_eq!(r.raw(SPACE, false, 0, true, false), Out::default());
+        assert_eq!(r.raw(SPACE, false, 0, false), Out::default());
         // the marker leaves tracking and consumption alone
         let mut r = Rig::new(default_cfg());
         r.down(LWIN);
         let before = r.engine.tracked_mods();
-        assert_eq!(r.raw(0xE8, true, 0, true, true), Out::default());
-        assert_eq!(r.raw(0xE8, false, 0, true, true), Out::default());
+        assert_eq!(r.raw(0xE8, true, 0, true), Out::default());
+        assert_eq!(r.raw(0xE8, false, 0, true), Out::default());
         assert_eq!(r.engine.tracked_mods(), before);
         assert!(r.engine.consumed_is_empty());
-        let marked_space = r.raw(SPACE, true, 0, true, true);
+        let marked_space = r.raw(SPACE, true, 0, true);
         assert_eq!(marked_space, Out::default());
         assert!(r.down(SPACE).consume, "the next real Space still starts the combo");
     }
@@ -1378,7 +1374,7 @@ mod tests {
                 let down = if held.has(vk) { rng.next() % 3 == 0 } else { true };
                 let repeat = down && held.has(vk);
                 let mods_before = r.engine.tracked_mods();
-                let o = r.raw(vk, down, 0, rng.next() % 4 == 0, false);
+                let o = r.raw(vk, down, 0, false);
                 if is_mod {
                     assert!(!o.consume, "modifier events always pass");
                 }
@@ -1587,7 +1583,7 @@ mod tests {
         let mut consumed = 0u64;
         for i in 0..1_000_000u64 {
             let (vk, down) = pattern[(i % pattern.len() as u64) as usize];
-            let o = e.on_key(KeyEvent { vk, scan: 0, down, injected: false, marker: false }, i * 100, &phys);
+            let o = e.on_key(KeyEvent { vk, scan: 0, down, marker: false }, i * 100, &phys);
             consumed += o.consume as u64;
         }
         let elapsed = started.elapsed();

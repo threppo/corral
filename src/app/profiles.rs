@@ -17,13 +17,12 @@ fn now_ms() -> i64 {
 
 pub(super) struct Pending {
     baseline: Layout,
-    old: Snapshot,
     latest: Snapshot,
 }
 
 impl Pending {
-    fn new(layout: &Layout, old: Snapshot, latest: Snapshot, _now: i64) -> Self {
-        Self { baseline: layout.clone(), old, latest }
+    fn new(layout: &Layout, _old: Snapshot, latest: Snapshot, _now: i64) -> Self {
+        Self { baseline: layout.clone(), latest }
     }
 
     fn observe(&mut self, live: Snapshot) -> bool {
@@ -34,7 +33,7 @@ impl Pending {
 
     #[cfg(test)]
     fn select(self, layout: &mut Layout, live: &Snapshot, now: i64) -> Switch {
-        let states = crate::desk_setup::fallback_monitors(&snapshot_monitors(live));
+        let states = display_settle_tests::states(live);
         self.select_states(layout, live, &states, now)
     }
 
@@ -399,7 +398,19 @@ mod display_settle_tests {
     use super::*;
     use crate::{desk_setup as ds, geometry::Rect, model::GroupContent};
     use crate::app::dpi_wiring_tests::{displays as two_displays, layout as two_layout};
-    fn evaluate(l:&mut Layout,s:&Snapshot,now:i64)->Switch {profile_store::switch_states(l,&ds::fallback_monitors(&snapshot_monitors(s)),now)}
+    pub(super) fn states(snapshot: &Snapshot) -> Vec<ds::MonitorState> {
+        let displays = snapshot.displays();
+        let left = displays.iter().map(|d| d.bounds.left).min().unwrap_or(0);
+        let top = displays.iter().map(|d| d.bounds.top).min().unwrap_or(0);
+        displays.iter().map(|d| ds::MonitorState {
+            size_px: (d.bounds.width() as u32, d.bounds.height() as u32),
+            scale_pct: ((u64::from(d.dpi) * 100 + 48) / 96) as u32,
+            offset_px: (d.bounds.left - left, d.bounds.top - top),
+            primary: d.primary, gdi_name: d.device.clone(), work: d.work,
+            ..Default::default()
+        }).collect()
+    }
+    fn evaluate(l:&mut Layout,s:&Snapshot,now:i64)->Switch {profile_store::switch_states(l,&states(s),now)}
     fn displays(dpi:u32)->Snapshot {
         Snapshot::new(vec![dpi::DisplaySnapshot::from_monitor(&crate::geometry::Monitor{name:"A".into(),bounds:Rect::new(0,0,2560,1440),work:Rect::new(0,0,2560,1400),dpi},true,None)]).unwrap()
     }
@@ -414,7 +425,7 @@ mod display_settle_tests {
     }
     #[test] fn rapid_changes_rearm_without_overwriting_old_profile() {
         let (mut l,old)=recorded();let bank=l.desk_setups.setups.clone();let mut p=Pending::new(&l,old.clone(),displays(144),3);
-        assert!(p.observe(displays(192)));assert!(!p.observe(displays(192)));assert_eq!(p.old,old);
+        assert!(p.observe(displays(192)));assert!(!p.observe(displays(192)));assert_eq!(p.baseline.groups,l.groups);
         p.select(&mut l,&displays(192),4);assert_eq!(l.desk_setups.setups,bank);
     }
     #[test] fn returning_to_original_before_settle_keeps_baseline() {
@@ -436,7 +447,7 @@ mod display_settle_tests {
         let t = crate::group_paint::title_rect_on(rescued.physical(), true, &metrics);
         assert!(t.top >= dest.work.top && t.bottom <= dest.work.bottom);
         assert_eq!((rescued.physical().width(), rescued.physical().height()), (601, 303));
-        assert_eq!(dpi::place(rescued, rescued.physical(), &live).unwrap().monitor, "Monitor A");
+        assert_eq!(dpi::place_governed(rescued, rescued.physical(), dest, &live, None).unwrap().monitor, "Monitor A");
     }
     #[test] fn removed_monitor_recovery_keeps_preference_then_fits_destination_and_returns_home() {
         let old=two_displays(false);let mut l=two_layout();
@@ -470,7 +481,7 @@ mod display_settle_tests {
         assert_eq!((p.rect_dip.width(),p.rect_dip.height()),(1280,1400));
     }
     #[test] fn empty_burst_does_not_destroy_original_baseline() {
-        let (l,old)=recorded();let empty=Snapshot::new(vec![]).unwrap();let mut p=Pending::new(&l,old.clone(),empty,3);assert!(p.observe(old.clone()));assert_eq!(p.baseline.groups,l.groups);assert_eq!(p.old,old);
+        let (l,old)=recorded();let empty=Snapshot::new(vec![]).unwrap();let mut p=Pending::new(&l,old.clone(),empty,3);assert!(p.observe(old.clone()));assert_eq!(p.baseline.groups,l.groups);assert_eq!(p.baseline.groups,l.groups);
     }
     #[test] fn layout_saves_during_settle_use_the_baseline() {
         let (mut l,old)=recorded();let p=Pending::new(&l,old,displays(144),3);l.groups[0].rect=Rect::new(1,2,30,40);assert_ne!(p.baseline.groups,l.groups);assert_eq!(p.baseline.desk_setups.setups,l.desk_setups.setups);

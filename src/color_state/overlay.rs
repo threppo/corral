@@ -62,9 +62,6 @@ impl OverlayHost {
     pub fn current(&self) -> Option<&Overlay> {
         self.current.as_ref()
     }
-    pub fn is_active(&self) -> bool {
-        self.current.is_some()
-    }
 
     /// A draft frame. A frame of a different session first puts the older overlay's stored look
     /// back (stale session id), then starts a new one.
@@ -105,12 +102,6 @@ impl OverlayHost {
             }
             None => false,
         }
-    }
-
-    /// A commit was stored: the draft values are now the stored values, so the overlay is simply
-    /// forgotten (nothing is restored).
-    pub fn settle(&mut self) -> Option<Overlay> {
-        self.current.take()
     }
 
     /// Forget the overlay without touching anything (the data it was shown on was replaced).

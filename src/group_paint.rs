@@ -51,11 +51,6 @@ pub fn px(dip: f64, dpi: u32) -> i32 {
     (dip * dpi as f64 / 96.0 + 0.5).floor() as i32
 }
 
-/// Short name of [`px`] for layout code.
-pub fn r(dip: f64, dpi: u32) -> i32 {
-    px(dip, dpi)
-}
-
 // ---- fonts and the strip height (2.2) -----------------------------------------------------------
 
 /// Em metrics of Segoe UI Variable / Segoe UI at 12 DIP: 1.079 + 0.251 + 0 (spec 9 test 1).
@@ -196,7 +191,7 @@ pub fn strip_radii(radius: f32, above: bool, folded: bool) -> [f32; 4] {
 // ---- 2.4 visibility ------------------------------------------------------------------------------
 
 /// Title visibility modes (`LabelMode`).
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub const LABEL_NEVER: u32 = 0;
 pub const LABEL_ON_HOVER: u32 = 1;
 pub const LABEL_ALWAYS: u32 = 2;
@@ -262,7 +257,7 @@ pub fn colorref_rgb(c: u32) -> Rgb {
 // ---- 4 title -------------------------------------------------------------------------------------
 
 /// `DarkenTitlebars` values.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub const SHADE_NONE: u32 = 0;
 pub const SHADE_DARK: u32 = 1;
 pub const SHADE_DARKER: u32 = 2;
@@ -911,7 +906,7 @@ fn paint_title_chrome(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 /// Both painters in order, for callers with no backdrop to place in between (the Tabs preview tiles).
 pub fn paint_corral(sink: &mut dyn Sink, p: &PaintInputs) -> Result<()> {
     paint_fills(sink, p)?;

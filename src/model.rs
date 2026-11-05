@@ -810,9 +810,13 @@ pub fn backup_path(path: &Path) -> PathBuf {
 pub fn save(path: &Path, layout: &Layout) -> io::Result<()> {
     // desk-setups-spec 5.4: never replace old keys until the byte backup succeeded.
     crate::desk_setup::ensure_migration_backup(path)?;
-    let mut migrated = layout.clone();
-    crate::desk_setup::migrate(&mut migrated);
-    let layout = &migrated;
+    let layout = if layout.profiles.is_null() {
+        std::borrow::Cow::Borrowed(layout)
+    } else {
+        let mut migrated = layout.clone();
+        crate::desk_setup::migrate(&mut migrated);
+        std::borrow::Cow::Owned(migrated)
+    };
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -821,7 +825,7 @@ pub fn save(path: &Path, layout: &Layout) -> io::Result<()> {
     let temp = PathBuf::from(temp);
     {
         let mut file = fs::File::create(&temp)?;
-        file.write_all(serde_json::to_string_pretty(layout).map_err(io::Error::other)?.as_bytes())?;
+        file.write_all(serde_json::to_string_pretty(layout.as_ref()).map_err(io::Error::other)?.as_bytes())?;
         file.sync_all()?;
     }
     if path.exists() {
@@ -833,6 +837,30 @@ pub fn save(path: &Path, layout: &Layout) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_bytes_match_clone_and_migrate_for_current_and_legacy_layouts() {
+        let dir = std::env::temp_dir().join("corral-perf-save")
+            .join(format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        for (i, profiles) in [
+            serde_json::Value::Null,
+            serde_json::json!({"old": {"future": 42}}),
+            serde_json::json!({"old": {"displays": [{"device": "m", "bounds": [0, 0, 1920, 1080], "dpi": 96}], "groups": {}, "loose": {}}}),
+        ].into_iter().enumerate() {
+            let mut layout = Layout::new();
+            layout.add_group("Saved".into(), "m".into(), Rect::new(0, 0, 300, 200), GroupContent::Items { items: vec!["item".into()] });
+            layout.profiles = profiles;
+            layout.active_profile = "old".into();
+            let before = layout.clone();
+            let mut expected = layout.clone();
+            crate::desk_setup::migrate(&mut expected);
+            let path = dir.join(format!("{i}.json"));
+            save(&path, &layout).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), serde_json::to_vec_pretty(&expected).unwrap());
+            assert_eq!(layout, before);
+        }
+    }
 
     #[test]
     fn reset_columns_removes_the_corral_key_and_reloads_defaults() {

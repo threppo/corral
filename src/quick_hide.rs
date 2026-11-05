@@ -488,11 +488,6 @@ impl DropPeek {
         }
     }
 
-    /// A click intervened: the pending hide is cancelled.
-    pub fn cancel_pending(&mut self) {
-        self.ended = None;
-    }
-
     pub fn poll(&mut self, t_ms: u64) -> PeekAct {
         match self.ended {
             Some(ended) if self.showing && t_ms.saturating_sub(ended) >= PEEK_HIDE_MS => {
@@ -1045,16 +1040,12 @@ mod tests {
     }
 
     #[test]
-    fn a_new_drag_or_a_click_cancels_the_pending_hide_and_without_auto_show_it_is_inert() {
+    fn a_new_drag_cancels_the_pending_hide_and_without_auto_show_it_is_inert() {
         let mut p = DropPeek::default();
         p.drag_over(true, true);
         p.drag_ended(0);
         assert_eq!(p.drag_over(true, true), PeekAct::None, "new drag");
         assert_eq!(p.poll(5000), PeekAct::None);
-        p.drag_ended(6000);
-        p.cancel_pending();
-        assert_eq!(p.poll(9000), PeekAct::None, "a click kept the picture");
-        assert!(p.is_showing());
         // inert: not hidden, or AutoShow / AutoShowOnDrag not both on
         let mut q = DropPeek::default();
         assert_eq!(q.drag_over(false, true), PeekAct::None);

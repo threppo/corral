@@ -87,7 +87,6 @@
 //! move, hit-testing, and drawing highlights. `DoDragDrop` is modal: it returns only when the drag
 //! ends, so call it from the mouse-move handler that detected the threshold, with the group state
 //! stored where the callbacks can reach it.
-#![allow(dead_code)]
 
 #[path = "dragdrop/bitmap.rs"]
 mod bitmap;
@@ -851,7 +850,7 @@ struct State {
 /// Outcome of routing one drag event.
 enum Routed {
     Rejected,
-    Internal(DROPEFFECT),
+    Internal,
     Shell,
     /// An Alt-drop answered here (accepted, or refused with `NONE`): the Shell is not involved.
     Alt(crate::creation::AltDrop),
@@ -934,7 +933,7 @@ impl DropTarget {
             DropHint::Internal(wanted) => {
                 self.drop_delegate();
                 *effect = if effect.0 & wanted.0 != 0 { DROPEFFECT(wanted.0 & effect.0) } else { DROPEFFECT_NONE };
-                return Routed::Internal(*effect);
+                return Routed::Internal;
             }
             DropHint::Shell if self.state.borrow().internal => {
                 // Corral's own drag must never reach the default Shell target (a Ctrl-copy onto the
@@ -1224,7 +1223,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
                 *effect = DROPEFFECT_NONE;
                 result = Ok(());
             }
-            Routed::Internal(_) => {
+            Routed::Internal => {
                 result = Ok(());
             }
             Routed::Shell => {
@@ -1296,11 +1295,6 @@ pub struct Registration {
     _target: IDropTarget,
 }
 
-impl Registration {
-    /// Revoke now (equivalent to dropping).
-    pub fn revoke(self) {}
-}
-
 impl Drop for Registration {
     fn drop(&mut self) {
         // Fails harmlessly when the window was already destroyed.
@@ -1365,13 +1359,6 @@ impl DragImage {
         Ok(DragImage::from_hbitmap(bitmap, width as i32, height as i32, hotspot))
     }
 
-    pub fn size(&self) -> (i32, i32) {
-        (self.size.cx, self.size.cy)
-    }
-
-    pub fn hbitmap(&self) -> HBITMAP {
-        self.bitmap
-    }
 }
 
 impl Drop for DragImage {
@@ -1505,30 +1492,6 @@ pub struct DragOutcome {
     pub logical_performed_effect: Option<DROPEFFECT>,
 }
 
-impl DragOutcome {
-    /// The drag ended in a move (the Shell moved the files, or asked the source to remove them).
-    /// Informational: the desktop enumeration/change notifications are authoritative.
-    pub fn moved(&self) -> bool {
-        self.effect == DROPEFFECT_MOVE
-    }
-
-    pub fn copied(&self) -> bool {
-        self.effect == DROPEFFECT_COPY
-    }
-
-    pub fn linked(&self) -> bool {
-        self.effect == DROPEFFECT_LINK
-    }
-
-    /// True when the target left the originals for the *source* to remove (an unoptimised move: the
-    /// target set `Performed DropEffect` to MOVE). An optimised move sets it to NONE and moves the
-    /// files itself. Explorer deletes only on this explicit signal; Corral never deletes here -
-    /// see the module documentation.
-    pub fn source_should_delete(&self) -> bool {
-        self.effect == DROPEFFECT_MOVE && self.performed_effect == Some(DROPEFFECT_MOVE)
-    }
-}
-
 const CFSTR_ISSHOWINGLAYERED: &str = "IsShowingLayered";
 const CFSTR_ISSHOWINGTEXT: &str = "IsShowingText";
 const CFSTR_DRAGWINDOW: &str = "DragWindow";
@@ -1567,9 +1530,6 @@ fn set_bytes_format(data: &IDataObject, name: &str, bytes: &[u8]) -> Result<()> 
 const CFSTR_DRAGSOURCEHELPERFLAGS: &str = "DragSourceHelperFlags";
 /// `CFSTR_INDRAGLOOP`: nonzero while the data object is inside a drag-and-drop loop.
 const CFSTR_INDRAGLOOP: &str = "InShellDragLoop";
-/// `DDWM_SETCURSOR` / `DDWM_UPDATEWINDOW` (`WM_USER + 2` / `WM_USER + 3`, shlobj_core.h and the
-/// DDWM_UPDATEWINDOW documentation): messages the drag-image window of the drag helper answers.
-const DDWM_SETCURSOR: u32 = 0x0400 + 2;
 const DDWM_UPDATEWINDOW: u32 = 0x0400 + 3;
 
 /// The drop-target feedback the Shell keeps in the drag data object: what a target wrote
@@ -1775,20 +1735,6 @@ fn initial_button_mask() -> u32 {
             if GetSystemMetrics(SM_SWAPBUTTON) != 0 { (physical_right, physical_left) } else { (physical_left, physical_right) };
         if right && !left { MK_RBUTTON.0 } else { MK_LBUTTON.0 }
     }
-}
-
-/// Runs a modal OLE drag of the given Shell items (all with the same parent folder) offering
-/// COPY, MOVE and LINK, and reports what the target did. `hwnd` owns the Shell objects.
-///
-/// Must be called on the UI thread after [`init_ole`], from a mouse handler with a button held
-/// (the drag ends when that button is released). The call returns when the drag ends. While it
-/// runs, drops on Corral's own windows are marked `internal` (see the module documentation).
-/// `drag_image` is optional; it is consumed either way.
-///
-/// Nothing is copied, moved or deleted here: the Shell targets do that, and a failure to build the
-/// data object returns `Err` before any drag starts.
-pub fn begin_drag(hwnd: HWND, parsing_names: &[String], drag_image: Option<DragImage>) -> Result<DragOutcome> {
-    begin_drag_as(hwnd, parsing_names, drag_image, true)
 }
 
 /// [`begin_drag`]; `internal` false makes Corral's own windows treat the drop as one from Explorer (a Shell
@@ -2151,7 +2097,7 @@ mod tests {
         let fake: IDropTarget = CountingTarget { drops: Rc::new(Cell::new(0)), leaves: leaves.clone() }.into();
         object.state.borrow_mut().delegate = Some(Delegate { dest: Destination::Item("mock".into()), dir: None, target: fake, effect: DROPEFFECT_NONE });
         let mut effect = ALL_EFFECTS;
-        assert!(matches!(object.route(MODIFIERKEYS_FLAGS(8), POINTL::default(), &mut effect, false, false), Routed::Internal(_)));
+        assert!(matches!(object.route(MODIFIERKEYS_FLAGS(8), POINTL::default(), &mut effect, false, false), Routed::Internal));
         assert_eq!(effect, DROPEFFECT_MOVE);
         assert_eq!(leaves.get(), 1);
         assert_eq!(&*highlights.borrow(), &[None]);
@@ -2648,7 +2594,7 @@ mod tests {
         assert_eq!(second.err().map(|e| e.code()), Some(DRAGDROP_E_ALREADYREGISTERED));
         drop(registration);
         let again = register(hwnd, new_target()).expect("re-register after revoke");
-        again.revoke();
+        drop(again);
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
@@ -2674,15 +2620,15 @@ mod tests {
     #[test]
     fn begin_drag_rejects_bad_input() {
         init();
-        assert!(begin_drag(HWND::default(), &[], None).is_err());
+        assert!(begin_drag_as(HWND::default(), &[], None, true).is_err());
         let sb1 = Sandbox::new("bad1");
         let sb2 = Sandbox::new("bad2");
         let (f1, f2) = (sb1.file_in_a("x.txt"), sb2.file_in_a("y.txt"));
-        let mixed = begin_drag(HWND::default(), &[f1, f2], None);
+        let mixed = begin_drag_as(HWND::default(), &[f1, f2], None, true);
         println!("  [begin_drag] mixed parents -> {:?}", mixed.as_ref().err().map(|e| e.message()));
         assert!(mixed.is_err());
         let missing = std::env::temp_dir().join("corral_dd_does_not_exist_77").join("nope.txt");
-        assert!(begin_drag(HWND::default(), &[missing.to_string_lossy().into_owned()], None).is_err());
+        assert!(begin_drag_as(HWND::default(), &[missing.to_string_lossy().into_owned()], None, true).is_err());
     }
 
     #[test]
@@ -2695,7 +2641,7 @@ mod tests {
         let data = data_object_for(HWND::default(), &[source]).expect("data object");
         let pixels = vec![0x80u8; 16 * 16 * 4];
         let image = DragImage::from_bgra_premultiplied(16, 16, &pixels, (8, 8)).expect("drag image");
-        assert_eq!(image.size(), (16, 16));
+        assert_eq!((image.size.cx, image.size.cy), (16, 16));
         let result = set_drag_image(&data, image);
         println!("  [drag image] InitializeFromBitmap on the Shell data object -> {:?}", result.as_ref().err().map(|e| e.code()));
         result.expect("InitializeFromBitmap");

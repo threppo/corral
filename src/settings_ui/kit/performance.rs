@@ -16,7 +16,7 @@ fn production_slider_row_matches_full_render_and_reports_cost() {
             scroll: 0,
         };
         let mut full = Surface::new(sc(1000.0, dpi) as u32, sc(720.0, dpi) as u32).unwrap();
-        render_settings_state(&mut full, &view, &settings, &theme, dpi).unwrap();
+        render_settings_editor(&mut full, &view, &settings, &[], &theme, dpi, None).unwrap();
         let slider = look_pages::SliderKind::SeeThrough;
         let mut partial = Surface::new(full.width(), full.height()).unwrap();
         partial.pixels_mut().copy_from_slice(full.pixels());
@@ -47,7 +47,7 @@ fn production_slider_row_matches_full_render_and_reports_cost() {
         );
         let start = std::time::Instant::now();
         for _ in 0..8 {
-            render_settings_state(&mut full, &view, &settings, &theme, dpi).unwrap();
+            render_settings_editor(&mut full, &view, &settings, &[], &theme, dpi, None).unwrap();
         }
         let page = start.elapsed().as_secs_f64() * 1000.0 / 8.0;
         let start = std::time::Instant::now();

@@ -53,9 +53,12 @@ const LIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 struct State {
     settings: Settings,
+    /// Last read/successfully saved copy, used to distinguish edits from stale values.
+    base: Settings,
     path: PathBuf,
     /// Layout file the Rules page reads Corrals from (read-only).
     layout_path: PathBuf,
+    scope_layout: ScopeLayoutCache,
     /// Corrals of the layout (reloaded whenever the Rules page opens).
     groups: Vec<GroupInfo>,
     view: View,
@@ -175,45 +178,44 @@ impl ColorSender {
                     LiveOutcome::Unavailable => {
                         // Quiet asynchronous file fallback: engine remains the sole layout writer.
                         // Serialize our own page saves with the worker so neither loses protocol state.
-                        let _write = COLOR_SETTINGS_WRITE.lock().unwrap();
-                        let mut latest = settings::load_with_backup(&path);
-                        let previous = latest
-                            .style_request
-                            .as_ref()
-                            .map(|r| r.nonce)
-                            .max(latest.style_result.as_ref().map(|r| r.nonce));
-                        let nonce = backups::issue_nonce(previous, backups::now_ms());
-                        let mut patch = request.patch.clone();
-                        // An unavailable engine has only one file slot. Preserve independent
-                        // fields from a queued edit of the same target before replacing it.
-                        if let Some(pending) = latest
-                            .style_request
-                            .as_ref()
-                            .filter(|p| p.layout_path == request.layout_path)
-                        {
-                            let previous_patch = match (&pending.action, request.target) {
-                                (Action::Edit { id, patch }, Some(target)) if *id == target => {
-                                    Some(patch)
+                        let result = write_settings(&path, None, |latest| {
+                            let previous = latest
+                                .style_request
+                                .as_ref()
+                                .map(|r| r.nonce)
+                                .max(latest.style_result.as_ref().map(|r| r.nonce));
+                            let nonce = backups::issue_nonce(previous, backups::now_ms());
+                            let mut patch = request.patch.clone();
+                            // An unavailable engine has only one file slot. Preserve independent
+                            // fields from a queued edit of the same target before replacing it.
+                            if let Some(pending) = latest
+                                .style_request
+                                .as_ref()
+                                .filter(|p| p.layout_path == request.layout_path)
+                            {
+                                let previous_patch = match (&pending.action, request.target) {
+                                    (Action::Edit { id, patch }, Some(target)) if *id == target => Some(patch),
+                                    (Action::EditAll { patch }, None) => Some(patch),
+                                    _ => None,
+                                };
+                                if let Some(previous_patch) = previous_patch {
+                                    let mut merged = previous_patch.clone();
+                                    merged.merge(&patch);
+                                    patch = merged;
                                 }
-                                (Action::EditAll { patch }, None) => Some(patch),
-                                _ => None,
-                            };
-                            if let Some(previous_patch) = previous_patch {
-                                let mut merged = previous_patch.clone();
-                                merged.merge(&patch);
-                                patch = merged;
                             }
-                        }
-                        latest.style_request = Some(Request {
-                            nonce,
-                            layout_path: request.layout_path.clone(),
-                            action: match request.target {
-                                Some(id) => Action::Edit { id, patch },
-                                None => Action::EditAll { patch },
-                            },
+                            latest.style_request = Some(Request {
+                                nonce,
+                                layout_path: request.layout_path.clone(),
+                                action: match request.target {
+                                    Some(id) => Action::Edit { id, patch },
+                                    None => Action::EditAll { patch },
+                                },
+                            });
+                            latest.style_result = None;
+                            Ok(())
                         });
-                        latest.style_result = None;
-                        post(if settings::save(&path, &latest).is_ok() {
+                        post(if result.is_ok() {
                             status::QUEUED_IN_FILE
                         } else {
                             status::FILE_SAVE_FAILED
@@ -845,18 +847,75 @@ fn clamp_scroll(st: &mut State, hwnd: HWND) {
     st.view.scroll = st.view.scroll.clamp(0, max);
 }
 
-fn save(st: &State) {
+/// All Settings-process writes share this boundary. Protocol writers mutate the
+/// freshly merged copy inside the lock, after the usual protocol ownership rules.
+fn write_settings(
+    path: &Path,
+    edits: Option<(&Settings, &Settings)>,
+    update: impl FnOnce(&mut Settings) -> std::io::Result<()>,
+) -> std::io::Result<Settings> {
+    write_settings_if(path, edits, |settings| {
+        update(settings)?;
+        Ok(true)
+    })
+}
+
+/// Withdrawals that no longer own the pending slot must not create an extra save
+/// (or replace the existing .bak). Check ownership on the fresh copy under the lock.
+fn write_settings_if(
+    path: &Path,
+    edits: Option<(&Settings, &Settings)>,
+    update: impl FnOnce(&mut Settings) -> std::io::Result<bool>,
+) -> std::io::Result<Settings> {
     let _write = COLOR_SETTINGS_WRITE.lock().unwrap();
-    let latest = settings::load_with_backup(&st.path);
-    let mut updated = st.settings.clone();
-    // Appearance IPC acknowledgements/file fallback belong to the engine/sender, not
-    // the page's cached Settings snapshot.
-    settings::style_request::merge_protocol(&mut updated, &latest);
-    updated.desk_setup_request = latest.desk_setup_request;
-    updated.desk_setup_result = latest.desk_setup_result;
-    if let Err(e) = settings::save(&st.path, &updated) {
+    let latest = settings::load_file(path)
+        .or_else(|| settings::load_file(&crate::model::backup_path(path)))
+        // Failed reads must not replace the window's known values with defaults.
+        .unwrap_or_else(|| edits.map_or_else(Settings::default, |(base, _)| base.clone()));
+    crate::tint::set_blur(latest.background_blur_enabled, latest.background_blur_radius);
+    let mut updated = match edits {
+        Some((base, edited)) => {
+            super::settings_merge::merge(base, edited, &latest).map_err(std::io::Error::other)?
+        }
+        None => latest,
+    };
+    if update(&mut updated)? {
+        settings::save(path, &updated)?;
+    }
+    Ok(updated)
+}
+
+fn accept_settings(st: &mut State, stored: Settings) {
+    st.base = stored.clone();
+    st.settings = stored;
+    st.page.refresh_globals(color_state::Globals::from_settings(&st.settings));
+    sync_look_state(st);
+}
+
+fn save_with(
+    st: &mut State,
+    update: impl FnOnce(&mut Settings) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let stored = write_settings(&st.path, Some((&st.base, &st.settings)), update)?;
+    accept_settings(st, stored);
+    Ok(())
+}
+
+fn save(st: &mut State) {
+    if let Err(e) = save_with(st, |_| Ok(())) {
         eprintln!("corral: cannot save settings: {e}");
     }
+}
+
+/// Refresh only the values the activation handler already refreshed. Keep drafts
+/// on other pages, and mark both refreshed fields as read rather than user edits.
+fn refresh_visible_settings(st: &mut State, stored: &Settings) -> bool {
+    let changed = (st.settings.tabs_style, st.settings.disabled) != (stored.tabs_style, stored.disabled);
+    st.settings.tabs_style = stored.tabs_style;
+    st.settings.disabled = stored.disabled;
+    st.base.tabs_style = stored.tabs_style;
+    st.base.disabled = stored.disabled;
+    changed
 }
 
 fn now_ms(st: &State) -> u64 {
@@ -1232,6 +1291,7 @@ fn caption_failed(st: &mut State, hwnd: HWND, caption: Caption) {
     // ones back before anything saves them.
     let disk = settings::load_with_backup(&st.path);
     restore_shared_colors(&mut st.settings, &disk);
+    restore_shared_colors(&mut st.base, &disk);
     let (globals, corrals) = read_color_data(st);
     st.page.save_failed(globals, corrals, caption);
     sync_look_state(st);
@@ -1721,6 +1781,7 @@ extern "system" fn choice_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> 
             return LRESULT(0);
         }
         WM_SETTINGCHANGE | WM_THEMECHANGED => {
+            crate::render::clear_text_measurements();
             st.theme = system_theme();
             st.surface = None;
             invalidate(hwnd);
@@ -2199,7 +2260,7 @@ fn on_click(hwnd: HWND, point: (i32, i32)) {
         }
         Hit::SaveBackup => save_backup(hwnd),
         Hit::ShortcutArrows { anchor } => shortcut_arrows_menu(hwnd, anchor),
-        Hit::BackupTile(index) | Hit::BackupRestore(index) => open_tile(hwnd, index),
+        Hit::BackupRestore(index) => open_tile(hwnd, index),
         Hit::BackupMore(index) => backup_more(hwnd, index, point),
         Hit::RuleAction(action) => rules_action(hwnd, action),
         Hit::Combo { field, rect } => {
@@ -2240,22 +2301,24 @@ fn run_style_request(hwnd: HWND, action: settings::style_request::Action) -> Res
         let Some(st) = state_mut(hwnd) else {
             return Err("The settings window was closed.".into());
         };
-        st.settings = settings::load_with_backup(&st.path);
-        let previous = st
-            .settings
-            .style_request
-            .as_ref()
-            .map(|r| r.nonce)
-            .max(st.settings.style_result.as_ref().map(|r| r.nonce));
-        let nonce = backups::issue_nonce(previous, backups::now_ms());
-        st.settings.style_request = Some(Request {
-            nonce,
-            layout_path: st.layout_path.clone(),
-            action,
-        });
-        st.settings.style_result = None;
-        settings::save(&st.path, &st.settings)
-            .map_err(|e| format!("Cannot request appearance change: {e}"))?;
+        let layout_path = st.layout_path.clone();
+        let mut nonce = 0;
+        save_with(st, |latest| {
+            let previous = latest
+                .style_request
+                .as_ref()
+                .map(|r| r.nonce)
+                .max(latest.style_result.as_ref().map(|r| r.nonce));
+            nonce = backups::issue_nonce(previous, backups::now_ms());
+            latest.style_request = Some(Request {
+                nonce,
+                layout_path,
+                action,
+            });
+            latest.style_result = None;
+            Ok(())
+        })
+        .map_err(|e| format!("Cannot request appearance change: {e}"))?;
         Ok((st.path.clone(), nonce))
     })();
     let (path, nonce) = prepared?;
@@ -2266,15 +2329,16 @@ fn run_style_request(hwnd: HWND, action: settings::style_request::Action) -> Res
     let mut result = None;
     loop {
         if !pump_messages() || !unsafe { IsWindow(hwnd) }.as_bool() {
-            let mut latest = settings::load_with_backup(&path);
-            if latest
-                .style_request
-                .as_ref()
-                .is_some_and(|r| r.nonce == nonce)
-            {
-                latest.style_request = None;
-                let _ = settings::save(&path, &latest);
-            }
+            let _ = write_settings_if(&path, None, |latest| {
+                let withdrawn = latest
+                    .style_request
+                    .as_ref()
+                    .is_some_and(|r| r.nonce == nonce);
+                if withdrawn {
+                    latest.style_request = None;
+                }
+                Ok(withdrawn)
+            });
             if unsafe { IsWindow(hwnd) }.as_bool() {
                 unsafe {
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hwnd, true);
@@ -2286,23 +2350,26 @@ fn run_style_request(hwnd: HWND, action: settings::style_request::Action) -> Res
         if let Some(answer) = latest.style_result.as_ref().filter(|r| r.nonce == nonce) {
             result = Some((answer.ok, answer.message.clone()));
             if let Some(st) = state_mut(hwnd) {
-                st.settings = latest;
+                accept_settings(st, latest);
             }
             break;
         }
         if start.elapsed().as_millis() >= 5000 {
-            let mut latest = latest;
             // Withdraw only our still-pending request. Never erase another writer's request.
-            if latest
-                .style_request
-                .as_ref()
-                .is_some_and(|r| r.nonce == nonce)
-            {
-                latest.style_request = None;
-                let _ = settings::save(&path, &latest);
-            }
+            let latest = write_settings_if(&path, None, |latest| {
+                let withdrawn = latest
+                    .style_request
+                    .as_ref()
+                    .is_some_and(|r| r.nonce == nonce);
+                if withdrawn {
+                    latest.style_request = None;
+                }
+                Ok(withdrawn)
+            });
             if let Some(st) = state_mut(hwnd) {
-                st.settings = latest;
+                if let Ok(latest) = latest {
+                    accept_settings(st, latest);
+                }
             }
             break;
         }
@@ -2554,13 +2621,51 @@ fn custom_swatch_anchor(st: &mut State, hwnd: HWND) -> Option<(i32, i32)> {
     None
 }
 
+type ScopeFileStamp = (std::time::SystemTime, u64);
+type ScopeLayoutStamp = (ScopeFileStamp, Option<ScopeFileStamp>);
+
+#[derive(Default)]
+struct ScopeLayoutCache {
+    stamp: Option<ScopeLayoutStamp>,
+    ids: std::collections::HashSet<u64>,
+}
+
+fn scope_layout_stamp(path: &Path) -> Option<ScopeLayoutStamp> {
+    let stamp = |p: &Path| -> std::io::Result<ScopeFileStamp> {
+        let meta = std::fs::metadata(p)?;
+        Ok((meta.modified()?, meta.len()))
+    };
+    let primary = stamp(path).ok()?;
+    // load_with_backup can use .bak even when the primary's metadata is unchanged.
+    let backup = match stamp(&crate::model::backup_path(path)) {
+        Ok(value) => Some(value),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return None,
+    };
+    Some((primary, backup))
+}
+
+impl ScopeLayoutCache {
+    fn alive(&mut self, path: &Path, id: u64) -> bool {
+        self.alive_with(path, id, || crate::model::load_with_backup(path).ok())
+    }
+
+    fn alive_with(&mut self, path: &Path, id: u64, load: impl FnOnce() -> Option<crate::model::Layout>) -> bool {
+        let stamp = scope_layout_stamp(path);
+        if stamp.is_some() && self.stamp == stamp { return self.ids.contains(&id); }
+        self.stamp = None;
+        let Some(layout) = load() else { return true; };
+        self.ids = layout.groups.iter().map(|g| g.id).collect();
+        self.stamp = stamp;
+        self.ids.contains(&id)
+    }
+}
+
 /// The scope's Corral was removed, or the page's data was replaced: look for it once a second.
 fn check_scope_alive(hwnd: HWND) {
     let Some(st) = state_mut(hwnd) else { return };
     let Scope::Corral(id) = st.page.scope() else { return };
-    let alive = crate::model::load_with_backup(&st.layout_path)
-        .map(|layout| layout.groups.iter().any(|g| g.id == id))
-        .unwrap_or(true);
+    let alive = st.scope_layout.alive(&st.layout_path, id);
     if !alive {
         reload_color_target(st);
         invalidate(hwnd);
@@ -2661,25 +2766,27 @@ fn run_desk_request(
         let Some(st) = state_mut(hwnd) else {
             return Err("The settings window was closed.".into());
         };
-        let _write = COLOR_SETTINGS_WRITE.lock().unwrap();
-        let mut latest = settings::load_with_backup(&st.path);
-        if latest.desk_setup_request.is_some() {
-            return Err(
-                "Corral is still processing a saved setup request. Try again in a moment.".into(),
+        let layout_path = st.layout_path.clone();
+        let mut nonce = 0;
+        save_with(st, |latest| {
+            if latest.desk_setup_request.is_some() {
+                return Err(std::io::Error::other(
+                    "Corral is still processing a saved setup request. Try again in a moment.",
+                ));
+            }
+            nonce = backups::issue_nonce(
+                latest.desk_setup_result.as_ref().map(|r| r.nonce),
+                backups::now_ms(),
             );
-        }
-        let nonce = backups::issue_nonce(
-            latest.desk_setup_result.as_ref().map(|r| r.nonce),
-            backups::now_ms(),
-        );
-        latest.desk_setup_request = Some(crate::desk_setup::Request {
-            nonce,
-            layout_path: crate::desk_setup::normalized_path(&st.layout_path),
-            action,
-        });
-        latest.desk_setup_result = None;
-        settings::save(&st.path, &latest).map_err(|e| e.to_string())?;
-        st.settings = latest;
+            latest.desk_setup_request = Some(crate::desk_setup::Request {
+                nonce,
+                layout_path: crate::desk_setup::normalized_path(&layout_path),
+                action,
+            });
+            latest.desk_setup_result = None;
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
         send_look_reload(st);
         (st.path.clone(), st.layout_path.clone(), nonce)
     };
@@ -2704,23 +2811,27 @@ fn run_desk_request(
                 Err(result.message.clone())
             };
             if let Some(st) = state_mut(hwnd) {
-                st.settings = latest;
+                accept_settings(st, latest);
             }
             super::desk_setups::refresh(&layout_path);
             return answer;
         }
         if started.elapsed() >= std::time::Duration::from_secs(10) {
-            let _write = COLOR_SETTINGS_WRITE.lock().unwrap();
-            let mut latest = settings::load_with_backup(&settings_path);
-            if latest
-                .desk_setup_request
-                .as_ref()
-                .is_some_and(|r| r.nonce == nonce)
-            {
-                latest.desk_setup_request = None;
-                settings::save(&settings_path, &latest).map_err(|e| e.to_string())?;
+            let mut withdrawn = false;
+            let latest = write_settings_if(&settings_path, None, |latest| {
+                withdrawn = latest
+                    .desk_setup_request
+                    .as_ref()
+                    .is_some_and(|r| r.nonce == nonce);
+                if withdrawn {
+                    latest.desk_setup_request = None;
+                }
+                Ok(withdrawn)
+            })
+            .map_err(|e| e.to_string())?;
+            if withdrawn {
                 if let Some(st) = state_mut(hwnd) {
-                    st.settings = latest;
+                    accept_settings(st, latest);
                 }
                 return Err("Corral did not answer. The saved setup request was withdrawn. Make sure Corral is running and try again.".into());
             }
@@ -2743,18 +2854,24 @@ fn run_request(hwnd: HWND, action: BackupAction) -> Answer {
         let Some(st) = state_mut(hwnd) else {
             return gone();
         };
-        // Start from the file: the app may have changed settings since this window loaded them.
-        st.settings = settings::load_with_backup(&st.path);
-        let previous = st
-            .settings
-            .snapshot_request
-            .as_ref()
-            .map(|r| r.nonce)
-            .max(st.settings.snapshot_result.as_ref().map(|r| r.nonce));
-        let nonce = backups::issue_nonce(previous, backups::now_ms());
-        st.settings.snapshot_request = Some(backups::new_request(nonce, action));
-        st.settings.snapshot_result = None;
-        save(st);
+        let mut nonce = 0;
+        let result = save_with(st, |latest| {
+            let previous = latest
+                .snapshot_request
+                .as_ref()
+                .map(|r| r.nonce)
+                .max(latest.snapshot_result.as_ref().map(|r| r.nonce));
+            nonce = backups::issue_nonce(previous, backups::now_ms());
+            latest.snapshot_request = Some(backups::new_request(nonce, action));
+            latest.snapshot_result = None;
+            Ok(())
+        });
+        if let Err(e) = result {
+            return Answer {
+                ok: false,
+                message: format!("Cannot request backup action: {e}"),
+            };
+        }
         (st.path.clone(), nonce)
     };
     // SAFETY: plain enable call on our window.
@@ -2781,7 +2898,7 @@ fn run_request(hwnd: HWND, action: BackupAction) -> Answer {
                     .clone()
                     .expect("poll_decision saw the result");
                 if let Some(st) = state_mut(hwnd) {
-                    st.settings = latest;
+                    accept_settings(st, latest);
                 }
                 break Answer {
                     ok: result.ok,
@@ -2790,13 +2907,23 @@ fn run_request(hwnd: HWND, action: BackupAction) -> Answer {
             }
             backups::Poll::Withdraw => {
                 // The app never took it: withdraw it so it cannot run later, when the app starts.
-                let mut latest = latest;
-                latest.snapshot_request = None;
-                if let Err(e) = settings::save(&path, &latest) {
-                    eprintln!("corral: cannot save settings: {e}");
-                }
-                if let Some(st) = state_mut(hwnd) {
-                    st.settings = latest;
+                let result = write_settings_if(&path, None, |latest| {
+                    let withdrawn = latest
+                        .snapshot_request
+                        .as_ref()
+                        .is_some_and(|r| r.nonce == nonce);
+                    if withdrawn {
+                        latest.snapshot_request = None;
+                    }
+                    Ok(withdrawn)
+                });
+                match result {
+                    Ok(latest) => {
+                        if let Some(st) = state_mut(hwnd) {
+                            accept_settings(st, latest);
+                        }
+                    }
+                    Err(e) => eprintln!("corral: cannot save settings: {e}"),
                 }
                 break Answer {
                     ok: false,
@@ -2806,7 +2933,7 @@ fn run_request(hwnd: HWND, action: BackupAction) -> Answer {
             backups::Poll::StillWorking => {
                 // The app took the request and is busy: it may still finish; do not suggest a retry.
                 if let Some(st) = state_mut(hwnd) {
-                    st.settings = latest;
+                    accept_settings(st, latest);
                 }
                 break Answer {
                     ok: true,
@@ -2827,12 +2954,6 @@ fn run_request(hwnd: HWND, action: BackupAction) -> Answer {
     }
     refresh_tiles(hwnd);
     answer
-}
-
-fn shift_down() -> bool {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_SHIFT};
-    // SAFETY: plain key state query.
-    unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 }
 }
 
 /// Saving always asks for a name; only an accepted dialog creates the existing capture request.
@@ -2958,12 +3079,6 @@ fn open_tile(hwnd: HWND, index: usize) {
     }
     let action = match outcome.chosen {
         None => return,
-        Some(Chosen::Recapture) => BackupAction::Recapture {
-            id: tile.id.clone(),
-        },
-        Some(Chosen::Delete) => BackupAction::Delete {
-            id: tile.id.clone(),
-        },
         Some(Chosen::Restore {
             backup_first,
             never_ask,
@@ -2999,7 +3114,7 @@ fn tile_under(st: &State, hwnd: HWND, point: (i32, i32)) -> Option<usize> {
         h,
         st.view.scroll,
     ) {
-        Ok(Hit::BackupTile(i) | Hit::BackupRestore(i) | Hit::BackupMore(i)) => Some(i),
+        Ok(Hit::BackupRestore(i) | Hit::BackupMore(i)) => Some(i),
         _ => None,
     }
 }
@@ -3194,76 +3309,6 @@ pub(super) enum Entry {
         enabled: bool,
     },
     Sep,
-    /// Cascading submenu (its items carry the ids).
-    Sub {
-        text: String,
-        items: Vec<Entry>,
-    },
-}
-
-/// Build the shell menu tree of `entries`.
-fn build_menu(entries: &[Entry]) -> Option<windows::Win32::UI::WindowsAndMessaging::HMENU> {
-    // SAFETY: `AppendMenuW` copies the strings; the handles are owned by the returned menu tree.
-    unsafe {
-        let menu = CreatePopupMenu().ok()?;
-        for e in entries {
-            match e {
-                Entry::Item {
-                    id,
-                    text,
-                    checked,
-                    enabled,
-                } => {
-                    let mut flags = MF_STRING;
-                    if *checked {
-                        flags |= MF_CHECKED;
-                    }
-                    if !*enabled {
-                        flags |= MF_GRAYED;
-                    }
-                    let _ = AppendMenuW(menu, flags, *id, &HSTRING::from(text.as_str()));
-                }
-                Entry::Sep => {
-                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-                }
-                Entry::Sub { text, items } => {
-                    if let Some(sub) = build_menu(items) {
-                        let _ = AppendMenuW(
-                            menu,
-                            MF_STRING | MF_POPUP,
-                            sub.0 as usize,
-                            &HSTRING::from(text.as_str()),
-                        );
-                    }
-                }
-            }
-        }
-        Some(menu)
-    }
-}
-
-/// Popup menu at a client point; returns the chosen item id.
-fn show_menu(hwnd: HWND, entries: &[Entry], anchor: (i32, i32)) -> Option<usize> {
-    let menu = build_menu(entries)?;
-    // SAFETY: the menu tree is local; DestroyMenu also frees its submenus.
-    unsafe {
-        let mut pt = windows::Win32::Foundation::POINT {
-            x: anchor.0,
-            y: anchor.1,
-        };
-        let _ = windows::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut pt);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN,
-            pt.x,
-            pt.y,
-            0,
-            hwnd,
-            None,
-        );
-        let _ = DestroyMenu(menu);
-        (cmd.0 > 0).then_some(cmd.0 as usize)
-    }
 }
 
 /// U4 menus reuse the destination-DPI Direct2D choices shell. No settings-state cast: owners may be dialogs.
@@ -3284,11 +3329,6 @@ pub(super) fn show_corral_menu(hwnd: HWND, entries: &[Entry], anchor: (i32, i32)
                 checked.push(*mark);
             }
             Entry::Sep => {}
-            Entry::Sub { text, .. } => {
-                choices.push((text.clone(), 0));
-                enabled.push(false);
-                checked.push(false);
-            }
         }
     }
     show_choice_items(hwnd, choices, enabled, checked, anchor, system_theme()).map(|v| v as usize)
@@ -3324,7 +3364,6 @@ fn shortcut_arrows_menu(hwnd: HWND, _anchor: (i32, i32)) {
     });
 }
 
-const ID_FIRST_ICON: usize = 2;
 const ID_GROUP_BASE: usize = 100;
 
 /// Corral choices of a destination menu; `current` is the checked Corral.
@@ -3363,18 +3402,6 @@ fn group_entries(groups: &[GroupInfo], current: Option<u64>) -> Vec<Entry> {
             enabled: true,
         })
         .collect()
-}
-
-fn warn(hwnd: HWND, text: &str, yes_no: bool) -> bool {
-    let light = state_mut(hwnd)
-        .map(|s| s.theme.light)
-        .unwrap_or_else(|| system_theme().light);
-    if yes_no {
-        crate::dialog::confirm(hwnd, light, "Corral", text, "Continue", false)
-    } else {
-        crate::dialog::notice(hwnd, light, "Corral", text);
-        true
-    }
 }
 
 /// Everything a handler needs from the state, taken before any nested loop starts.
@@ -4003,9 +4030,7 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
             if let Some(st) = state_mut(hwnd) {
                 // Changed outside this window (the Corral menu, the tray icon): a later save must not undo them.
                 let stored = settings::load_with_backup(&st.path);
-                if (st.settings.tabs_style, st.settings.disabled) != (stored.tabs_style, stored.disabled) {
-                    st.settings.tabs_style = stored.tabs_style;
-                    st.settings.disabled = stored.disabled;
+                if refresh_visible_settings(st, &stored) {
                     invalidate(hwnd);
                 }
             }
@@ -4114,9 +4139,15 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
         }
         WM_SETTINGCHANGE | WM_THEMECHANGED => {
             let st = unsafe { &mut *ptr };
+            crate::render::clear_text_measurements();
             st.theme = system_theme();
             caption_theme(hwnd, &st.theme);
             st.surface = None;
+            invalidate(hwnd);
+            return LRESULT(0);
+        }
+        WM_FONTCHANGE => {
+            crate::render::clear_text_measurements();
             invalidate(hwnd);
             return LRESULT(0);
         }
@@ -4165,11 +4196,11 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
                 invalidate_look_slider(hwnd, kind);
                 return LRESULT(0);
             }
-            super::set_control_pointer(Some((p.0 as f32, p.1 as f32)), st.pressed);
+            let pointer_changed = super::set_control_pointer(Some((p.0 as f32, p.1 as f32)), st.pressed);
             if matches!(
                 st.view.page,
                 Page::Rules | Page::Personalization | Page::Camouflage
-            ) {
+            ) && pointer_changed {
                 repaint(hwnd);
             }
             let (w, h) = client_size(hwnd);
@@ -4223,10 +4254,14 @@ fn window_proc_inner(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LR
             return LRESULT(0);
         }
         WM_MOUSELEAVE => {
-            super::set_control_pointer(None, false);
+            let pointer_changed = super::set_control_pointer(None, false);
             // SAFETY: as above.
             let st = unsafe { &mut *ptr };
             st.tracking = false;
+            // The move gate compares pointers, not pixels: repaint here, or a highlight painted before leaving stays.
+            if pointer_changed && matches!(st.view.page, Page::Rules | Page::Personalization | Page::Camouflage) {
+                repaint(hwnd);
+            }
             if st.hover_hit != Hit::Nothing {
                 st.hover_hit = Hit::Nothing;
                 repaint(hwnd);
@@ -4431,9 +4466,11 @@ pub fn run_settings_window(
         let loaded = settings::load_with_backup(settings_path);
         let page = initial_page(&loaded, layout_path);
         let state = Box::new(State {
+            base: loaded.clone(),
             settings: loaded,
             path: settings_path.to_path_buf(),
             layout_path: layout_path.to_path_buf(),
+            scope_layout: ScopeLayoutCache::default(),
             groups: Vec::new(),
             view: View {
                 page: start_page.unwrap_or(Page::Welcome),
@@ -4551,8 +4588,354 @@ pub fn run_settings_window(
 }
 
 #[cfg(test)]
+mod scope_layout_cache_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join("corral-perf-scope")
+            .join(format!("{tag}-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        root.join("layout.json")
+    }
+
+    fn layout_bytes(id: u64) -> Vec<u8> {
+        let mut layout = crate::model::Layout::new();
+        layout.add_group("Scope".into(), "m".into(), crate::geometry::Rect::new(0, 0, 100, 100), crate::model::GroupContent::Items { items: vec![] });
+        layout.groups[0].id = id;
+        serde_json::to_vec(&layout).unwrap()
+    }
+
+    fn alive(cache: &mut ScopeLayoutCache, path: &Path, id: u64, reads: &Cell<usize>) -> bool {
+        cache.alive_with(path, id, || {
+            reads.set(reads.get() + 1);
+            crate::model::load_with_backup(path).ok()
+        })
+    }
+
+    #[test]
+    fn unchanged_scope_reuses_ids_and_either_metadata_field_invalidates() {
+        let path = scratch("metadata");
+        std::fs::write(&path, layout_bytes(1)).unwrap();
+        let time = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let mut cache = ScopeLayoutCache::default();
+        let reads = Cell::new(0);
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert!(!alive(&mut cache, &path, 2, &reads));
+        assert_eq!(reads.get(), 1, "scope changes can use the same parsed IDs");
+
+        // Same timestamp, different length.
+        std::fs::write(&path, layout_bytes(22)).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
+        assert!(!alive(&mut cache, &path, 1, &reads));
+        assert!(alive(&mut cache, &path, 22, &reads));
+        assert_eq!(reads.get(), 2);
+
+        // Same length, different timestamp.
+        std::fs::write(&path, layout_bytes(33)).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(time + std::time::Duration::from_secs(2)).unwrap();
+        assert!(!alive(&mut cache, &path, 22, &reads));
+        assert!(alive(&mut cache, &path, 33, &reads));
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn fallback_backup_changes_invalidate_an_unchanged_broken_primary() {
+        let path = scratch("fallback");
+        let backup = crate::model::backup_path(&path);
+        std::fs::write(&path, b"broken").unwrap();
+        std::fs::write(&backup, layout_bytes(1)).unwrap();
+        let mut cache = ScopeLayoutCache::default();
+        let reads = Cell::new(0);
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert_eq!(reads.get(), 1);
+        std::fs::write(&backup, layout_bytes(22)).unwrap();
+        assert!(!alive(&mut cache, &path, 1, &reads));
+        assert_eq!(reads.get(), 2);
+        std::fs::write(&backup, b"broken too").unwrap();
+        assert!(alive(&mut cache, &path, 1, &reads), "failed load keeps the scope alive");
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert_eq!(reads.get(), 4, "parse failures must be retried");
+    }
+
+    #[test]
+    fn missing_or_unreadable_layout_keeps_the_scope_alive_and_retries() {
+        let path = scratch("missing");
+        let mut cache = ScopeLayoutCache::default();
+        let reads = Cell::new(0);
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert_eq!(reads.get(), 2);
+        std::fs::create_dir(&path).unwrap();
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert!(alive(&mut cache, &path, 1, &reads));
+        assert_eq!(reads.get(), 4);
+    }
+}
+
+#[cfg(test)]
 mod q33e_tests {
     use super::*;
+
+    struct MergeTestDir(PathBuf);
+
+    impl Drop for MergeTestDir {
+        fn drop(&mut self) {
+            let dir = self.0.canonicalize().unwrap();
+            let temp = std::env::temp_dir().canonicalize().unwrap();
+            assert_eq!(dir.parent(), Some(temp.as_path()));
+            assert!(
+                dir.file_name().unwrap().to_string_lossy().starts_with("corral-settings-merge-")
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    fn merge_test_state() -> (State, MergeTestDir) {
+        let dir = std::env::temp_dir().join(format!(
+            "corral-settings-merge-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let settings = Settings::default();
+        let state = State {
+            base: settings.clone(),
+            scope_layout: ScopeLayoutCache::default(),
+            page: ColorPage::new(
+                color_state::Globals::from_settings(&settings),
+                vec![],
+                Scope::All,
+                1,
+            ),
+            settings,
+            path: dir.join("settings.json"),
+            layout_path: dir.join("layout.json"),
+            groups: vec![],
+            view: View {
+                page: Page::Welcome,
+                hover: None,
+                scroll: 0,
+            },
+            dpi: 96,
+            theme: Theme::light(),
+            surface: None,
+            caption_visible: false,
+            look_drag: None,
+            look_dirty: None,
+            look_last_send: None,
+            look_pending: false,
+            pressed: false,
+            focus_index: None,
+            focus_visible: false,
+            hover_hit: Hit::Nothing,
+            throttle: Throttle::new(16),
+            clock: std::time::Instant::now(),
+            framed: None,
+            pending_focus: None,
+            sender: None,
+            notice: String::new(),
+            tracking: false,
+            tip: HWND::default(),
+            tip_text: vec![0],
+        };
+        (state, MergeTestDir(dir))
+    }
+
+    fn known_window_settings() -> Settings {
+        let mut settings = Settings {
+            color: 0x123456,
+            text_color: 0xabcdef,
+            ..Settings::default()
+        };
+        settings.round_up.rules[0].name = "Window rule".into();
+        settings.tips.insert("window-tip".into(), 17);
+        settings
+    }
+
+    #[test]
+    fn settings_write_both_corrupt_keeps_window_values_plus_edit() {
+        let (st, _dir) = merge_test_state();
+        let base = known_window_settings();
+        let edited = Settings {
+            snap_padding: 6,
+            ..base.clone()
+        };
+        std::fs::write(&st.path, "corrupt main").unwrap();
+        std::fs::write(crate::model::backup_path(&st.path), "corrupt backup").unwrap();
+
+        let updated = write_settings_if(&st.path, Some((&base, &edited)), |_| Ok(true)).unwrap();
+
+        assert_eq!(updated, edited);
+        assert_eq!(settings::load_file(&st.path).unwrap(), edited);
+    }
+
+    #[test]
+    fn settings_write_corrupt_main_merges_good_backup() {
+        let (st, _dir) = merge_test_state();
+        let base = known_window_settings();
+        let edited = Settings {
+            snap_padding: 6,
+            ..base.clone()
+        };
+        let mut latest = base.clone();
+        latest.color = 0x654321;
+        latest.round_up.rules[0].name = "Backup rule".into();
+        latest.tips.insert("backup-tip".into(), 23);
+        std::fs::write(&st.path, "corrupt main").unwrap();
+        std::fs::write(
+            crate::model::backup_path(&st.path),
+            settings::round_up_store::encode(&latest).unwrap(),
+        )
+        .unwrap();
+
+        let updated = write_settings_if(&st.path, Some((&base, &edited)), |_| Ok(true)).unwrap();
+
+        latest.snap_padding = edited.snap_padding;
+        assert_eq!(updated, latest);
+        assert_eq!(settings::load_file(&st.path).unwrap(), latest);
+    }
+
+    #[test]
+    fn settings_write_first_run_without_main_or_backup() {
+        let (mut st, _dir) = merge_test_state();
+        assert!(!st.path.exists());
+        assert!(!crate::model::backup_path(&st.path).exists());
+        st.settings.snap_padding = 6;
+
+        let updated = write_settings_if(
+            &st.path,
+            Some((&st.base, &st.settings)),
+            |_| Ok(true),
+        )
+        .unwrap();
+
+        assert_eq!(updated, st.settings);
+        assert_eq!(settings::load_file(&st.path).unwrap(), st.settings);
+        assert!(!crate::model::backup_path(&st.path).exists());
+    }
+
+    #[test]
+    fn settings_save_advances_base_and_preserves_engine_write_between_saves() {
+        let (mut st, _dir) = merge_test_state();
+        settings::save(&st.path, &st.settings).unwrap();
+        st.settings.snap_padding = 6;
+        save_with(&mut st, |_| Ok(())).unwrap();
+        assert_eq!(st.base, st.settings);
+        assert_eq!(st.base.snap_padding, 6);
+
+        let mut engine = settings::load_with_backup(&st.path);
+        engine.snap_padding = 12;
+        engine.quick_hide_active = !engine.quick_hide_active;
+        settings::save(&st.path, &engine).unwrap();
+        st.settings.show_in_taskbar = !st.settings.show_in_taskbar;
+        let taskbar = st.settings.show_in_taskbar;
+        save_with(&mut st, |_| Ok(())).unwrap();
+        let disk = settings::load_with_backup(&st.path);
+        assert_eq!(
+            disk.snap_padding, 12,
+            "first edit must not be applied again"
+        );
+        assert_eq!(disk.quick_hide_active, engine.quick_hide_active);
+        assert_eq!(disk.show_in_taskbar, taskbar);
+        assert_eq!(st.settings, disk);
+        assert_eq!(st.base, disk);
+        let backup = st.path.with_extension("json.bak");
+        assert_eq!(settings::load_with_backup(&backup), engine);
+    }
+
+    #[test]
+    fn settings_failed_save_retains_base_and_edits_for_retry() {
+        let (mut st, _dir) = merge_test_state();
+        let base = st.base.clone();
+        st.settings.snap_padding = 6;
+        // A directory at the temporary file name causes a deterministic write failure.
+        std::fs::create_dir(st.path.with_extension("json.tmp")).unwrap();
+        assert!(save_with(&mut st, |_| Ok(())).is_err());
+        assert_eq!(st.base, base);
+        assert_eq!(st.settings.snap_padding, 6);
+    }
+
+    #[test]
+    fn settings_activation_refresh_does_not_become_an_edit_on_next_save() {
+        let (mut st, _dir) = merge_test_state();
+        let mut engine = st.settings.clone();
+        engine.tabs_style = 3;
+        engine.disabled = !st.settings.disabled;
+        assert!(refresh_visible_settings(&mut st, &engine));
+        assert_eq!(st.base.tabs_style, 3);
+        assert_eq!(st.base.disabled, engine.disabled);
+        engine.tabs_style = 2;
+        engine.disabled = !engine.disabled;
+        settings::save(&st.path, &engine).unwrap();
+        st.settings.snap_padding = 6;
+        save_with(&mut st, |_| Ok(())).unwrap();
+        assert_eq!(st.settings.tabs_style, 2);
+        assert_eq!(st.settings.disabled, engine.disabled);
+        assert_eq!(st.settings.snap_padding, 6);
+    }
+
+    #[test]
+    fn settings_save_refreshes_stored_colours_without_ending_the_open_draft() {
+        let (mut st, _dir) = merge_test_state();
+        st.page.begin(ColorField::Background);
+        st.page.slide(0x123456);
+        let session = st.page.session().unwrap().clone();
+        let mut engine = st.settings.clone();
+        engine.text_color = 0x345678;
+        settings::save(&st.path, &engine).unwrap();
+        st.settings.snap_padding = 6;
+        save_with(&mut st, |_| Ok(())).unwrap();
+        assert_eq!(st.page.session().unwrap(), &session);
+        assert_eq!(st.page.effective().color, 0x123456);
+        assert_eq!(st.page.globals().text_color, 0x345678);
+        assert_eq!(st.settings.text_color, 0x345678);
+        st.page.end(true);
+        assert_eq!(st.page.globals(), &color_state::Globals::from_settings(&st.settings));
+    }
+
+    #[test]
+    fn settings_protocol_writer_preserves_edits_and_withdrawal_does_not_erase_new_slot() {
+        let (mut st, _dir) = merge_test_state();
+        settings::save(&st.path, &st.settings).unwrap();
+        let mut engine = st.settings.clone();
+        engine.quick_hide_active = !engine.quick_hide_active;
+        settings::save(&st.path, &engine).unwrap();
+        st.settings.snap_padding = 6;
+        save_with(&mut st, |latest| {
+            latest.desk_setup_request = Some(crate::desk_setup::Request {
+                nonce: 22,
+                layout_path: "qa.json".into(),
+                action: crate::desk_setup::Action::SwapMonitors,
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(st.base, st.settings);
+        assert_eq!(st.settings.quick_hide_active, engine.quick_hide_active);
+        assert_eq!(st.settings.snap_padding, 6);
+        let before = std::fs::read(&st.path).unwrap();
+        let backup = st.path.with_extension("json.bak");
+        let before_backup = std::fs::read(&backup).unwrap();
+        write_settings_if(&st.path, None, |latest| {
+            let owned = latest
+                .desk_setup_request
+                .as_ref()
+                .is_some_and(|r| r.nonce == 21);
+            if owned {
+                latest.desk_setup_request = None;
+            }
+            Ok(owned)
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&st.path).unwrap(), before);
+        assert_eq!(std::fs::read(&backup).unwrap(), before_backup);
+    }
+
     #[test]
     fn u1_fix_native_alt_down_is_routed_without_stealing_system_shortcuts() {
         assert!(dispatch_settings_key(WM_SYSKEYDOWN, 0x28, true));
@@ -4592,7 +4975,7 @@ mod q33e_tests {
         for dpi in [96, 120, 144, 240] {
             let (w, h, scroll) = (sc(760.0, dpi), sc(520.0, dpi), sc(200.0, dpi));
             let targets =
-                super::super::focus_targets(&settings, Page::Rollup, dpi, w, h, scroll).unwrap();
+                super::super::focus_targets_with(&settings, &[], Page::Rollup, dpi, w, h, scroll).unwrap();
             let (hit, r) = targets
                 .iter()
                 .find(|(hit, _)| *hit == Hit::Toggle(Field::RollupEnabled))
@@ -4792,7 +5175,7 @@ mod u4_integrated_menu_tests {
                     let lay = crate::dialog::layout(&spec, spec.width);
                     let mut surface =
                         Surface::new(sc(lay.width, dpi) as u32, sc(lay.height, dpi) as u32)?;
-                    surface.draw(|ctx| crate::dialog::draw_spec(ctx, &spec, dpi, light))?;
+                    surface.draw(|ctx| crate::dialog::draw_contents(ctx, &spec, &crate::dialog::layout(&spec, (&spec).width), crate::dialog::layout(&spec, (&spec).width).height, 0., None, false, None, None, dpi, &crate::settings_ui::kit::theme::Theme::new(light), true))?;
                     surface.save_png(&dir.join(format!(
                         "{name}-{}-{dpi}.png",
                         if light { "light" } else { "dark" }

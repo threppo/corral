@@ -93,7 +93,7 @@ mod tests {
                     )
                     .unwrap();
                     surface
-                        .draw(|ctx| dialog::draw_spec(ctx, &spec, dpi, light))
+                        .draw(|ctx| dialog::draw_contents(ctx, &spec, &crate::dialog::layout(&spec, (&spec).width), crate::dialog::layout(&spec, (&spec).width).height, 0., None, false, None, None, dpi, &crate::settings_ui::kit::theme::Theme::new(light), true))
                         .unwrap();
                     surface
                         .save_png(&dir.join(format!(

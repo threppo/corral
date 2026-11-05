@@ -102,7 +102,7 @@ impl Snapshot {
         for m in &self.monitors {
             for l in [&m.blurred, &m.s, &m.sharp].into_iter().flatten() {
                 if seen.insert(Arc::as_ptr(l)) {
-                    total += l.bytes();
+                    total += l.bgrx.len();
                 }
             }
         }

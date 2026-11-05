@@ -3,8 +3,8 @@
 //! The approved Corral redesign is in `docs/design/settings-redesign-spec.md`. Legacy declarations
 //! keep their structure until their U2-U4 conversion; `Row::control_kind` supplies the kit
 //! default mapping without changing their fields or gates. Declarations use `Row::new`, `.b(field)`,
-//! `.g(gates)` and optional `.choices`, `.lines`, `.button`, `.destination` or `.range` metadata.
-//! Controllers pair `Row::current_value` with `Row::apply_value` for merged field mappings, and
+//! `.g(gates)` and optional `.choices`, `.lines`, `.button`, `.range` metadata.
+//! Controllers pair `Row::current_value` with the production mutation helpers for merged field mappings, and
 //! own persistence/reload after applying a value. Hidden, licensing and business-only items stay omitted.
 
 use super::Page;
@@ -29,17 +29,11 @@ pub enum RowKind {
     InfoBox,
     /// A settings-field slider; `choices` selects named steps, empty means percent.
     ValueSlider,
-    Number,
-    Check,
-    Radio,
-    Combo,
     Button,
     /// Hyperlink-coloured text.
     Link,
     /// Plain label (card title when `desc` is set).
     Label,
-    /// Grey small note.
-    Note,
     /// The existing backup tile list (Backups page, `backups.rs`; U4 replaces its presentation).
     Tiles,
 }
@@ -91,8 +85,6 @@ pub struct Row {
     pub expanded: bool,
     pub button_text: Option<&'static str>,
     pub primary: bool,
-    /// Check-row destination chip; selection is supplied by the page's controller.
-    pub destination_chip: Option<&'static str>,
     /// Inclusive minimum/maximum and keyboard step for steppers and continuous sliders.
     pub range: Option<(i64, i64, i64)>,
 }
@@ -113,7 +105,6 @@ impl Row {
             expanded: false,
             button_text: None,
             primary: false,
-            destination_chip: None,
             range: None,
         }
     }
@@ -152,10 +143,6 @@ impl Row {
         self.primary = primary;
         self
     }
-    pub const fn destination(mut self, text: &'static str) -> Row {
-        self.destination_chip = Some(text);
-        self
-    }
     pub const fn range(mut self, min: i64, max: i64, step: i64) -> Row {
         self.range = Some((min, max, step));
         self
@@ -164,16 +151,12 @@ impl Row {
     /// Explicit compatibility mapping keeps old page declarations behaviorally unchanged.
     pub const fn control_kind(self) -> RowKind {
         match self.kind {
-            RowKind::Check => RowKind::Toggle,
-            RowKind::Radio => RowKind::RadioRow,
-            RowKind::Combo => RowKind::Dropdown,
             RowKind::Link if self.goto.is_some() => RowKind::Navigate,
-            RowKind::Number => RowKind::Stepper,
             other => other,
         }
     }
 
-    /// Display value for ordinary and merged settings. Keep this paired with `apply_value`.
+    /// Display value for ordinary and merged settings.
     pub fn current_value(self, settings: &crate::settings::Settings) -> i64 {
         if self.bind == Some(Field::RollupRequireClick)
             && self.secondary_bind == Some(Field::RollupRequireDelay)
@@ -185,31 +168,6 @@ impl Row {
             settings.swipe_animation_style as i64
         } else {
             self.bind.map_or(self.value, |field| settings.get(field))
-        }
-    }
-
-    /// Updates the existing settings model; the caller still owns save/reload/live-apply.
-    /// Returns false for inert rows and values outside an explicit choice list.
-    pub fn apply_value(self, settings: &mut crate::settings::Settings, value: i64) -> bool {
-        if !self.choices.is_empty() && !self.choices.iter().any(|choice| choice.1 == value) {
-            return false;
-        }
-        if self.bind == Some(Field::RollupRequireClick)
-            && self.secondary_bind == Some(Field::RollupRequireDelay)
-        {
-            return apply_fold_open_mode(settings, value);
-        }
-        if self.bind == Some(Field::AutoHideIdle) {
-            return apply_idle_mode(settings, value);
-        }
-        if self.bind == Some(Field::SwipeAnimate) && self.secondary_bind.is_some() {
-            return apply_animation(settings, value);
-        }
-        if let Some(field) = self.bind {
-            settings.set(field, value);
-            true
-        } else {
-            false
         }
     }
 
@@ -329,31 +287,8 @@ pub struct PageContent {
     pub master: Option<Field>,
 }
 
-/// Legacy capture button retained for old controller callers; the Backups page uses a button row.
-pub const SAVE_BACKUP_ROW: Row = Row::new(RowKind::Button, super::backups::SAVE_TEXT, None);
 pub const TILES_ROW: Row = Row::new(RowKind::Tiles, "", None);
 
-const fn chk(text: &'static str) -> Row {
-    Row::new(RowKind::Check, text, None)
-}
-const fn rad(text: &'static str) -> Row {
-    Row::new(RowKind::Radio, text, None)
-}
-const fn cmb(text: &'static str) -> Row {
-    Row::new(RowKind::Combo, text, None)
-}
-const fn btn(text: &'static str) -> Row {
-    Row::new(RowKind::Button, text, None)
-}
-const fn lnk(text: &'static str) -> Row {
-    Row::new(RowKind::Link, text, None)
-}
-const fn lbl(text: &'static str) -> Row {
-    Row::new(RowKind::Label, text, None)
-}
-const fn note(text: &'static str) -> Row {
-    Row::new(RowKind::Note, text, None)
-}
 const CORRAL_ON_DESC: &str = "Your Corrals, Gates and shortcuts are active. Turn Corral off to show the plain desktop.";
 /// The Welcome status row while Corral is off; no longer than the text the row's height was measured for.
 pub const CORRAL_OFF_DESC: &str = "Your Corrals, Gates and shortcuts are paused. Turn Corral on to bring them back.";
@@ -361,21 +296,10 @@ pub const CORRAL_OFF_DESC: &str = "Your Corrals, Gates and shortcuts are paused.
 const fn card_l(text: &'static str, desc: &'static str) -> Row {
     Row::new(RowKind::Label, text, Some(desc))
 }
-const fn card_k(text: &'static str, desc: &'static str) -> Row {
-    Row::new(RowKind::Link, text, Some(desc))
-}
 fn sec(header: &'static str, rows: Vec<Row>) -> Section {
     Section {
         header,
         joined: false,
-        rows,
-        gates: &[],
-    }
-}
-fn joined(header: &'static str, rows: Vec<Row>) -> Section {
-    Section {
-        header,
-        joined: true,
         rows,
         gates: &[],
     }
@@ -462,7 +386,6 @@ pub fn content(page: Page) -> PageContent {
                     Row::new(RowKind::Expander, "Advanced", None),
                     Row::new(RowKind::Toggle, "Titlebar buttons on hover", Some("Show the menu and close buttons when you point at a titlebar.")),
                     Row::new(RowKind::Toggle, "Titlebar below near the screen top", Some("When a Corral touches the top edge, its titlebar moves underneath.")),
-                    Row::new(RowKind::Toggle, "Animate icon movement", Some("Icons glide to their new place when Corrals are sorted or resized.")).b(Field::AnimateIcons),
                     Row::new(RowKind::Toggle, "Scrollbars only on hover", Some("Hide Corral scrollbars until you point at the Corral.")).b(Field::HideScrollbars),
                     Row::new(RowKind::Toggle, "Restore see-through on hover", Some("A faded Corral becomes solid while you point at it.")).b(Field::FadeInOpacity).g(&[Gate::Show(Field::FadedGroupsVisible)]),
                 ]),
@@ -731,10 +654,6 @@ pub fn combo_choices_for_build(field: Field, current: i64, build: u32) -> Vec<(S
             ("Icon blend strength: 90%", 229),
             ("Icon blend strength: 100%", 255),
         ]),
-        Field::TintColorMode => list(&[
-            ("Match Corral", 0),
-            ("Use custom color", 1),
-        ]),
         Field::CreateCorralMode => list(&[
             ("Either button", 0),
             ("Left button", 1),
@@ -817,7 +736,7 @@ mod tests {
             (rows[1], Field::RollupOnDock),
         ] {
             for value in [0, 1] {
-                assert!(row.apply_value(&mut settings, value));
+                settings.set(field, value);
                 assert_eq!(settings.get(field), value);
                 settings.set(field, 1 - value);
                 assert_eq!(row.current_value(&settings), 1 - value);
@@ -840,7 +759,7 @@ mod tests {
                 for mode in [0, 1, 2] {
                     settings.set(Field::RollupRequireClick, click);
                     settings.set(Field::RollupRequireDelay, delay);
-                    assert!(row.apply_value(&mut settings, mode));
+                    assert!(apply_fold_open_mode(&mut settings, mode));
                     assert_eq!(
                         settings.get(Field::RollupRequireClick),
                         i64::from(mode == 2)
@@ -852,7 +771,7 @@ mod tests {
                     assert_eq!(row.current_value(&settings), mode);
                 }
                 let before = settings.clone();
-                assert!(!row.apply_value(&mut settings, 3));
+                assert!(!apply_fold_open_mode(&mut settings, 3));
                 assert_eq!(settings, before);
             }
         }
@@ -872,7 +791,7 @@ mod tests {
         assert_eq!(toggle.bind, Some(Field::InheritViewFromParent));
         let mut settings = Settings::default();
         for value in [0, 1] {
-            assert!(toggle.apply_value(&mut settings, value));
+            settings.set(toggle.bind.unwrap(), value);
             assert_eq!(toggle.current_value(&settings), value);
         }
         assert!(
@@ -907,7 +826,7 @@ mod tests {
         );
         assert!(
             rows.iter()
-                .all(|row| !matches!(row.kind, RowKind::Combo | RowKind::Dropdown | RowKind::Link))
+                .all(|row| !matches!(row.kind, RowKind::Dropdown | RowKind::Link))
         );
     }
 
@@ -933,7 +852,7 @@ mod tests {
         assert_eq!(daily.bind, Some(Field::DailyBackups));
         let mut settings = Settings::default();
         for value in [0, 1] {
-            assert!(daily.apply_value(&mut settings, value));
+            settings.set(daily.bind.unwrap(), value);
             assert_eq!(daily.current_value(&settings), value);
         }
         assert_eq!(page.sections[1].header, "Saved backups");
@@ -942,31 +861,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_row_mapping_keeps_settings_gates_and_destinations() {
-        for (old, new) in [
-            (RowKind::Check, RowKind::Toggle),
-            (RowKind::Radio, RowKind::RadioRow),
-            (RowKind::Combo, RowKind::Dropdown),
-            (RowKind::Number, RowKind::Stepper),
-        ] {
-            let row = Row::new(old, "Legacy", None)
-                .b(Field::DailyBackups)
-                .g(&[Gate::Enable(Field::SnapEnabled)]);
-            assert_eq!(row.control_kind(), new);
-            assert_eq!(row.bind, Some(Field::DailyBackups));
-            assert_eq!(row.gates, &[Gate::Enable(Field::SnapEnabled)]);
-        }
-        assert_eq!(
-            lnk("Navigate").to(Page::About).control_kind(),
-            RowKind::Navigate
-        );
-        assert_eq!(lnk("Help").control_kind(), RowKind::Link);
-        for kind in [
-            RowKind::Label,
-            RowKind::Note,
-            RowKind::Tiles,
-        ] {
-            assert_eq!(Row::new(kind, "Legacy", None).control_kind(), kind);
+    fn row_metadata_keeps_settings_gates_and_destinations() {
+        let row = Row::new(RowKind::Toggle, "Setting", None)
+            .b(Field::DailyBackups)
+            .g(&[Gate::Enable(Field::SnapEnabled)]);
+        assert_eq!(row.control_kind(), RowKind::Toggle);
+        assert_eq!(row.bind, Some(Field::DailyBackups));
+        assert_eq!(row.gates, &[Gate::Enable(Field::SnapEnabled)]);
+        assert_eq!(Row::new(RowKind::Link, "Navigate", None).to(Page::About).control_kind(), RowKind::Navigate);
+        assert_eq!(Row::new(RowKind::Link, "Help", None).control_kind(), RowKind::Link);
+        for kind in [RowKind::Label, RowKind::Tiles] {
+            assert_eq!(Row::new(kind, "Row", None).control_kind(), kind);
         }
     }
 

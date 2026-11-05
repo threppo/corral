@@ -95,9 +95,6 @@ impl EdgeZone {
     pub const fn intersects(self, other: EdgeZone) -> bool {
         self.0 & other.0 != 0
     }
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
     /// Any of the four edge bits.
     pub const fn is_edge(self) -> bool {
         self.0 & 0xf0 != 0
@@ -690,7 +687,7 @@ mod tests {
             for y in 0..side {
                 for x in 0..side {
                     let z = resize_zone(outer, title, (x, y), &zctx(dpi));
-                    assert!(!z.is_empty());
+                    assert_ne!(z.bits(), 0);
                     seen.insert(z.bits());
                 }
             }
@@ -1125,7 +1122,6 @@ mod tests {
         for dpi in [96, 144, 240] {
             let start = Rect::new(300, 250, 300 + px(333.0, dpi), 250 + px(177.0, dpi));
             let (w, h) = (start.width(), start.height());
-            let mut at = start;
             let (mut sx, mut sy) = (0, 0);
             for _ in 0..10_000 {
                 let (dx, dy) = (next(37), next(29));
@@ -1133,12 +1129,12 @@ mod tests {
                 sy += dy;
                 // snapping off: the position is exactly start + pointer delta
                 let raw = start.offset(sx, sy);
-                at = snap_move(&MoveInput { raw, work: Rect::new(-5000, -5000, 5000, 5000), neighbours: &[], settings: SnapSettings::new(false, 0, true, true, true), dpi, shift: false, lock: SnapLock::default() }).rect;
+                let at = snap_move(&MoveInput { raw, work: Rect::new(-5000, -5000, 5000, 5000), neighbours: &[], settings: SnapSettings::new(false, 0, true, true, true), dpi, shift: false, lock: SnapLock::default() }).rect;
                 assert_eq!((at.width(), at.height()), (w, h));
             }
             // bring the pointer back to the start
             let raw = start.offset(sx - sx, sy - sy);
-            at = snap_move(&MoveInput { raw, work: Rect::new(-5000, -5000, 5000, 5000), neighbours: &[], settings: SnapSettings::new(false, 0, true, true, true), dpi, shift: false, lock: SnapLock::default() }).rect;
+            let at = snap_move(&MoveInput { raw, work: Rect::new(-5000, -5000, 5000, 5000), neighbours: &[], settings: SnapSettings::new(false, 0, true, true, true), dpi, shift: false, lock: SnapLock::default() }).rect;
             assert_eq!(at, start);
             // with snapping on, width and height still never change in a move
             let n = [Rect::new(700, 100, 900, 300)];

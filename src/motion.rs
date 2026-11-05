@@ -17,9 +17,6 @@ pub enum Curve {
     Out,
     /// Things leaving, closing (mirror of `Out`).
     In,
-    /// Reserved for moves between two resting places (no use yet, spec 1.1).
-    #[allow(dead_code)]
-    InOut,
     /// Ranges "Bounce": one overshoot of about 3 % of the travel.
     Bounce,
 }
@@ -30,7 +27,6 @@ impl Curve {
         match self {
             Curve::Out => (0.10, 0.50, 0.30, 1.00),
             Curve::In => (0.70, 0.00, 0.90, 0.50),
-            Curve::InOut => (0.40, 0.00, 0.60, 1.00),
             Curve::Bounce => (0.34, 1.30, 0.64, 1.00),
         }
     }
@@ -238,7 +234,7 @@ impl TimerGate {
 mod tests {
     use super::*;
 
-    const CURVES: [Curve; 4] = [Curve::Out, Curve::In, Curve::InOut, Curve::Bounce];
+    const CURVES: [Curve; 3] = [Curve::Out, Curve::In, Curve::Bounce];
 
     #[test]
     fn every_curve_has_exact_endpoints_and_clamps_its_input() {
@@ -253,7 +249,7 @@ mod tests {
 
     #[test]
     fn out_in_and_inout_are_monotone_and_mirror_each_other() {
-        for c in [Curve::Out, Curve::In, Curve::InOut] {
+        for c in [Curve::Out, Curve::In] {
             let mut last = 0.0;
             for i in 0..=1000 {
                 let v = ease(c, i as f64 / 1000.0);
@@ -263,7 +259,6 @@ mod tests {
         }
         assert!(ease(Curve::Out, 0.5) > 0.5);
         assert!(ease(Curve::In, 0.5) < 0.5);
-        assert!((ease(Curve::InOut, 0.5) - 0.5).abs() < 1e-4);
         for i in 0..=100 {
             let p = i as f64 / 100.0;
             assert!((ease(Curve::In, p) - (1.0 - ease(Curve::Out, 1.0 - p))).abs() < 1e-4, "mirror at {p}");

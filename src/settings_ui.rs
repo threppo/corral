@@ -27,8 +27,6 @@
 //!
 //! All 13 codepoints were checked in both installed font cmap tables on 2026-10-16.
 
-#![allow(dead_code)]
-
 mod appearance_reset;
 mod backup_dialog;
 mod backups;
@@ -43,6 +41,7 @@ pub mod kit;
 pub(super) mod look_pages;
 mod rules_dialog;
 mod rules_page;
+mod settings_merge;
 pub(super) mod sample_corral;
 mod style_menus;
 mod uia;
@@ -160,16 +159,10 @@ pub struct Theme {
     pub nav_hover: Rgba,
     pub header_text: Rgba,
     pub sub_header_text: Rgba,
-    pub sub_header_text2: Rgba,
     pub group_fill: Rgba,
     pub group_outline: Rgba,
-    pub control_border: Rgba,
     /// Hyperlink colour. Dark: (132,115,200); light: derived, unverified.
     pub link: Rgba,
-    /// Hint / footnote text (NavLabelTextDisabledSolid: (108,108,108) light, (127,127,127) dark; frame 043 shows 128).
-    pub note_text: Rgba,
-    /// Unchecked check box fill (frame 040: (243,243,243) in the dark theme).
-    pub check_fill: Rgba,
     /// SystemAccent; Windows accent fallback (0,120,215).
     pub accent: Rgba,
 }
@@ -193,20 +186,13 @@ impl Theme {
             nav_hover: t.subtle_hover,
             header_text: t.text,
             sub_header_text: t.secondary,
-            sub_header_text2: t.secondary,
             group_fill: t.surface,
             group_outline: t.border,
-            control_border: t.border,
             link: t.link,
-            note_text: t.secondary,
-            check_fill: t.control,
             accent: t.accent,
         }
     }
 
-    pub fn with_accent(self, _accent: Rgba) -> Theme {
-        self
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -257,11 +243,12 @@ pub fn nav_hit_test(point: (i32, i32), dpi: u32, height: i32) -> Option<Page> {
 }
 
 fn icon_family() -> &'static str {
-    if Path::new(r"C:\Windows\Fonts\SegoeIcons.ttf").exists() {
+    static FAMILY: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    FAMILY.get_or_init(|| if Path::new(r"C:\Windows\Fonts\SegoeIcons.ttf").exists() {
         "Segoe Fluent Icons"
     } else {
         "Segoe MDL2 Assets"
-    }
+    })
 }
 
 /// Point size to pixel size at `dpi`.
@@ -327,50 +314,6 @@ pub struct View {
     pub scroll: i32,
 }
 
-/// Draw the whole settings client area into `surface` with default settings values and no scroll.
-pub fn render_settings(
-    surface: &mut Surface,
-    page: Page,
-    hover: Option<Page>,
-    theme: &Theme,
-    dpi: u32,
-) -> Result<()> {
-    render_settings_state(
-        surface,
-        &View {
-            page,
-            hover,
-            scroll: 0,
-        },
-        &Settings::default(),
-        theme,
-        dpi,
-    )
-}
-
-/// Draw the whole settings client area (size = client size at `dpi`) with real settings state.
-pub fn render_settings_state(
-    surface: &mut Surface,
-    view: &View,
-    settings: &Settings,
-    theme: &Theme,
-    dpi: u32,
-) -> Result<()> {
-    render_settings_groups(surface, view, settings, &[], theme, dpi)
-}
-
-/// As [`render_settings_state`]; `groups` are the Corrals of the current layout (Rules page).
-pub fn render_settings_groups(
-    surface: &mut Surface,
-    view: &View,
-    settings: &Settings,
-    groups: &[GroupInfo],
-    theme: &Theme,
-    dpi: u32,
-) -> Result<()> {
-    render_settings_editor(surface, view, settings, groups, theme, dpi, None)
-}
-
 /// The settings window supplies its retained HSV state; offscreen callers may use stored RGB.
 pub fn render_settings_editor(
     surface: &mut Surface,
@@ -381,6 +324,7 @@ pub fn render_settings_editor(
     dpi: u32,
     editor: Option<&crate::color_state::Effective>,
 ) -> Result<()> {
+    let _pointer_regions = PointerRegions::begin(matches!(view.page, Page::Rules | Page::Personalization | Page::Camouflage));
     if let Some(effective) = editor {
         look_pages::set_effective(effective);
     } else {
@@ -534,13 +478,6 @@ fn draw_nav(
 
 // Measured from 96-dpi reference frames: check rows are
 // 23-24 px apart, card padding 8-9 px, 12 px from the card edge to the box.
-const ROW_H: f32 = 23.5;
-const COMBO_H: f32 = 30.0;
-const NOTE_H: f32 = 20.0;
-const CARD_PAD_X: f32 = 12.0;
-const CARD_PAD_Y: f32 = 8.5;
-/// Welcome descriptions wrap ~52 px before the card edge (frame 002: wraps before "or detach.").
-const DESC_RIGHT_PAD: f32 = 38.0;
 const JOIN_GAP: f32 = 2.0;
 const PAGE_BOTTOM_PAD: f32 = 40.0; // Approved content bottom padding.
 const CAPTION_BAR_HEIGHT: f32 = 32.0; // Caption line plus 8 DIP vertical padding.
@@ -607,7 +544,6 @@ struct SecLay {
     header: &'static str,
     header_rect: RectF,
     card: RectF,
-    joined: bool,
     rows: Vec<RowLay>,
 }
 
@@ -642,9 +578,42 @@ thread_local! {
     static CONTROL_POINTER: std::cell::Cell<Option<(f32,f32,bool)>> = const { std::cell::Cell::new(None) };
     static FOCUS_RING: std::cell::Cell<Option<RectF>> = const { std::cell::Cell::new(None) };
     static LOOK_CACHE:std::cell::RefCell<Option<LookCache>> = const {std::cell::RefCell::new(None)};
+    static POINTER_REGIONS: std::cell::RefCell<Vec<(RectF, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static RECORD_POINTER_REGIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
-pub fn set_control_pointer(point: Option<(f32, f32)>, pressed: bool) {
-    CONTROL_POINTER.with(|p| p.set(point.map(|(x, y)| (x, y, pressed))));
+// Record the rectangles actually consulted by drawing, including nested controls whose hover
+// differs from the click target. Partial slider paints keep the last full page's regions.
+struct PointerRegions;
+impl PointerRegions {
+    fn begin(record: bool) -> Self {
+        POINTER_REGIONS.with(|r| r.borrow_mut().clear());
+        RECORD_POINTER_REGIONS.with(|r| r.set(record));
+        Self
+    }
+}
+impl Drop for PointerRegions {
+    fn drop(&mut self) { RECORD_POINTER_REGIONS.with(|r| r.set(false)); }
+}
+fn pointer_state_in(rect: RectF, pointer: Option<(f32, f32, bool)>) -> (bool, bool) {
+    let hover = pointer.is_some_and(|(x, y, _)| x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom);
+    (hover, hover && pointer.is_some_and(|(_, _, down)| down))
+}
+fn control_pointer_state(rect: RectF) -> (bool, bool) {
+    if RECORD_POINTER_REGIONS.with(|r| r.get()) {
+        POINTER_REGIONS.with(|r| r.borrow_mut().push((rect, 0)));
+    }
+    CONTROL_POINTER.with(|p| pointer_state_in(rect, p.get()))
+}
+fn pointer_region_state(rect: RectF, segments: usize, pointer: Option<(f32, f32, bool)>) -> Option<(usize, bool)> {
+    if !pointer_state_in(rect, pointer).0 { return None; }
+    let (x, _, down) = pointer.unwrap();
+    Some((if segments == 0 { 0 } else { (((x - rect.left) / (rect.right - rect.left)) * segments as f32) as usize }, down))
+}
+/// Whether the move changed a hover/pressed state used by the last full page paint.
+pub fn set_control_pointer(point: Option<(f32, f32)>, pressed: bool) -> bool {
+    let next = point.map(|(x, y)| (x, y, pressed));
+    let old = CONTROL_POINTER.with(|p| p.replace(next));
+    POINTER_REGIONS.with(|r| r.borrow().iter().any(|(rect, segments)| pointer_region_state(*rect, *segments, old) != pointer_region_state(*rect, *segments, next)))
 }
 pub fn set_focus_ring(rect: Option<RectF>) {
     FOCUS_RING.with(|r| r.set(rect));
@@ -1101,7 +1070,6 @@ fn layout_page_with(
             header: section.header,
             header_rect,
             card: RectF::new(cx, card_top, right, card_bottom),
-            joined: section.joined,
             rows,
         });
     }
@@ -1136,17 +1104,6 @@ fn backup_rows(_page: Page, _header: &str, rows: &[Row]) -> Vec<Row> {
     rows.to_vec()
 }
 
-/// Total height of a page's content in pixels at `dpi` for a client of `width` (for scroll limits).
-pub fn content_height(
-    settings: &Settings,
-    page: Page,
-    dpi: u32,
-    width: i32,
-    height: i32,
-) -> Result<i32> {
-    content_height_with(settings, &[], page, dpi, width, height)
-}
-
 /// As [`content_height`] with the layout's Corrals (the Rules page height depends on them).
 pub fn content_height_with(
     settings: &Settings,
@@ -1164,32 +1121,6 @@ pub fn content_height_with(
             .bottom
             .ceil() as i32,
     )
-}
-
-/// Largest scroll offset for a client of `width` x `height`.
-pub fn max_scroll(
-    settings: &Settings,
-    page: Page,
-    dpi: u32,
-    width: i32,
-    height: i32,
-) -> Result<i32> {
-    max_scroll_with(settings, &[], page, dpi, width, height)
-}
-
-pub fn max_scroll_with(
-    settings: &Settings,
-    groups: &[GroupInfo],
-    page: Page,
-    dpi: u32,
-    width: i32,
-    height: i32,
-) -> Result<i32> {
-    Ok(scroll_with_bottom_padding(
-        content_height_with(settings, groups, page, dpi, width, height)?,
-        height,
-        0,
-    ))
 }
 
 fn monitor_count() -> i32 {
@@ -1270,7 +1201,6 @@ pub enum Hit {
     /// "Save backup" button.
     SaveBackup,
     /// Backup tile (index into the ascending list).
-    BackupTile(usize),
     BackupRestore(usize),
     BackupMore(usize),
     RuleAction(rules_page::Action),
@@ -1390,7 +1320,7 @@ fn hit_test_layout(page: Page, point: (i32, i32), dpi: u32, lay: &PageLay) -> Re
                 return Ok(Hit::SaveBackup);
             }
             match row.row.kind {
-                RowKind::Number | RowKind::Stepper => {
+                RowKind::Stepper => {
                     let r = control_rect(row, dpi)?;
                     let scale = dpi as f32 / 96.0;
                     let bounds = RectF::new(
@@ -1415,17 +1345,17 @@ fn hit_test_layout(page: Page, point: (i32, i32), dpi: u32, lay: &PageLay) -> Re
                         });
                     }
                 }
-                RowKind::Check | RowKind::Toggle | RowKind::CheckRow => {
+                RowKind::Toggle | RowKind::CheckRow => {
                     if let (true, Some(f)) = (inside(full), row.row.bind) {
                         return Ok(Hit::Toggle(f));
                     }
                 }
-                RowKind::Radio | RowKind::RadioRow => {
+                RowKind::RadioRow => {
                     if let (true, Some(f)) = (inside(full), row.row.bind) {
                         return Ok(Hit::Radio(f, row.row.value));
                     }
                 }
-                RowKind::Combo | RowKind::Dropdown => {
+                RowKind::Dropdown => {
                     let r = combo_box_rect(row, dpi);
                     if inside(r) && row.row.text == "All groups" {
                         return Ok(Hit::ColorTarget {
@@ -1720,14 +1650,8 @@ fn draw_page(
             // Clip a card-sized rounded fill to the row so end rows keep the card corners.
             if row.enabled
                 && matches!(row.row.control_kind(), RowKind::Toggle | RowKind::Navigate)
-                && CONTROL_POINTER.with(|p| {
-                    p.get().is_some_and(|(x, y, _)| {
-                        x >= card.left + scf(1.0, dpi)
-                            && x < card.right - scf(1.0, dpi)
-                            && y >= row.y
-                            && y < row.y + row.h
-                    })
-                })
+                && control_pointer_state(RectF::new(card.left + scf(1.0, dpi), row.y,
+                    card.right - scf(1.0, dpi), row.y + row.h)).0
             {
                 ctx.with_clip(
                     RectF::new(card.left, row.y, card.right, row.y + row.h),
@@ -1753,51 +1677,6 @@ fn draw_page(
 
 fn with_alpha(c: Rgba, a: u8) -> Rgba {
     Rgba::new(c.r, c.g, c.b, ((c.a as u32 * a as u32) / 255) as u8)
-}
-
-/// Check box (96 dpi): 13 px square; unchecked = filled
-/// near-white square (243 in the dark theme) with soft edge, checked = accent fill with a white check.
-fn draw_checkbox(
-    ctx: &crate::render::Ctx,
-    r: RectF,
-    checked: bool,
-    theme: &Theme,
-    dpi: u32,
-    alpha: u8,
-) -> Result<()> {
-    if checked {
-        ctx.fill_rounded_rect(r, scf(2.0, dpi), with_alpha(theme.accent, alpha))?;
-        let glyph_px = (r.right - r.left) * 0.8;
-        ctx.draw_text_cached(
-            "\u{E73E}",
-            r,
-            &style(
-                icon_family(),
-                glyph_px,
-                400,
-                with_alpha(Rgba::new(255, 255, 255, 255), alpha),
-                Align::Center,
-            ),
-        )
-    } else {
-        let inset = scf(0.75, dpi);
-        let inner = RectF::new(
-            r.left + inset,
-            r.top + inset,
-            r.right - inset,
-            r.bottom - inset,
-        );
-        ctx.fill_rounded_rect(inner, scf(1.5, dpi), with_alpha(theme.check_fill, alpha))?;
-        if theme.light {
-            ctx.stroke_rounded_rect(
-                r,
-                scf(2.0, dpi),
-                scf(1.0, dpi).max(1.0),
-                with_alpha(Rgba::new(120, 120, 120, 255), alpha),
-            )?;
-        }
-        Ok(())
-    }
 }
 
 /// Backup tiles: placeholder thumbnail (Corral takes no screenshots) above the title; the hovered tile gets an accent outline.
@@ -1848,6 +1727,7 @@ fn kit_draw(
     value: f32,
 ) -> Result<()> {
     let scale = dpi as f32 / 96.0;
+    let (hovered, pressed) = control_pointer_state(r);
     kit::controls::draw_control(
         ctx,
         kind,
@@ -1861,16 +1741,8 @@ fn kit_draw(
         kit::controls::VisualState {
             enabled,
             selected,
-            hovered: CONTROL_POINTER.with(|p| {
-                p.get().is_some_and(|(x, y, _)| {
-                    x >= r.left && x < r.right && y >= r.top && y < r.bottom
-                })
-            }),
-            pressed: CONTROL_POINTER.with(|p| {
-                p.get().is_some_and(|(x, y, down)| {
-                    down && x >= r.left && x < r.right && y >= r.top && y < r.bottom
-                })
-            }),
+            hovered,
+            pressed,
             ..Default::default()
         },
         &kit::theme::Theme::new(theme.light),
@@ -2152,6 +2024,9 @@ fn draw_row(
             )?;
         }
         RowKind::Segmented => {
+            if RECORD_POINTER_REGIONS.with(|record| record.get()) {
+                POINTER_REGIONS.with(|regions| regions.borrow_mut().push((r, row.choices.len())));
+            }
             let scale = dpi as f32 / 96.0;
             let bounds = RectF::new(
                 r.left / scale,
@@ -2309,16 +2184,6 @@ pub fn render_look_slider_row(
     });
     Ok(Some(dirty))
 }
-pub fn focus_targets(
-    settings: &Settings,
-    page: Page,
-    dpi: u32,
-    width: i32,
-    height: i32,
-    scroll: i32,
-) -> Result<Vec<(Hit, RectF)>> {
-    focus_targets_with(settings, &[], page, dpi, width, height, scroll)
-}
 
 pub fn focus_targets_with(
     settings: &Settings,
@@ -2436,6 +2301,76 @@ fn focus_targets_layout(page: Page, dpi: u32, lay: &PageLay) -> Result<Vec<(Hit,
 #[cfg(test)]
 mod tests {
     #[test]
+    fn pointer_repaint_gate_never_skips_changed_page_pixels() -> Result<()> {
+        use super::*;
+        let mut settings = Settings::default();
+        let rule = settings.round_up.new_user_rule();
+        settings.round_up.insert_rule(rule);
+        look_pages::set_scope(None, vec![], false);
+        set_focus_ring(None);
+        for theme in [Theme::light(), Theme::dark()] {
+            for page in [Page::Rules, Page::Personalization, Page::Camouflage] {
+                let view = View { page, hover: None, scroll: 0 };
+                let mut surface = Surface::new(1000, 1600)?;
+                set_control_pointer(None, false);
+                render_settings_editor(&mut surface, &view, &settings, &[], &theme, 96, None)?;
+                let regions = POINTER_REGIONS.with(|r| r.borrow().clone());
+                assert!(!regions.is_empty());
+                let mut unchanged_moves = 0;
+                for (r, segments) in regions {
+                    let y = (r.top + r.bottom) / 2.;
+                    let parts = segments.max(1);
+                    for part in 0..parts {
+                        let x = r.left + (r.right - r.left) * (part as f32 + 0.5) / parts as f32;
+                        // Entry, motion within a control/segment, then departure. Compare actual
+                        // raster bytes: hit equality alone misses nested checkbox and arrow hover.
+                        for point in [Some((x, y)), Some((x + 0.1, y)), None] {
+                            let before = surface.pixels().to_vec();
+                            let repaint = set_control_pointer(point, false);
+                            render_settings_editor(&mut surface, &view, &settings, &[], &theme, 96, None)?;
+                            if !repaint {
+                                unchanged_moves += 1;
+                                assert!(before == surface.pixels(), "missed hover repaint on {page:?} at {point:?}");
+                            }
+                        }
+                    }
+                }
+                assert!(unchanged_moves > 0);
+            }
+        }
+        set_control_pointer(None, false);
+        drop(PointerRegions::begin(false));
+        Ok(())
+    }
+
+    #[test]
+    fn pointer_repaint_tracks_nested_regions_and_segment_boundaries() {
+        use super::*;
+        set_control_pointer(None, false);
+        {
+            let _record = PointerRegions::begin(true);
+            control_pointer_state(RectF::new(10., 10., 110., 60.));
+            control_pointer_state(RectF::new(70., 20., 100., 50.));
+            POINTER_REGIONS.with(|r| r.borrow_mut().push((RectF::new(10., 70., 110., 100.), 3)));
+        }
+        assert!(!set_control_pointer(Some((1., 1.)), false));
+        assert!(set_control_pointer(Some((20., 30.)), false));
+        assert!(!set_control_pointer(Some((40., 30.)), false));
+        assert!(set_control_pointer(Some((80., 30.)), false));
+        assert!(!set_control_pointer(Some((90., 30.)), false));
+        assert!(set_control_pointer(Some((90., 30.)), true));
+        assert!(set_control_pointer(Some((20., 80.)), false));
+        assert!(!set_control_pointer(Some((30., 80.)), false));
+        assert!(set_control_pointer(Some((50., 80.)), false));
+        assert!(set_control_pointer(None, false));
+        assert!(!set_control_pointer(None, false));
+        // A partial draw must not append regions indefinitely during a captured slider drag.
+        control_pointer_state(RectF::new(0., 0., 1., 1.));
+        POINTER_REGIONS.with(|r| assert_eq!(r.borrow().len(), 3));
+        drop(PointerRegions::begin(false));
+    }
+
+    #[test]
     fn c2_desk_setup_row_is_only_in_remembered_layout_mode_and_button_is_focusable()
     -> windows::core::Result<()> {
         use super::*;
@@ -2470,7 +2405,7 @@ mod tests {
                         Hit::SavedDeskSetups
                     );
                     assert!(
-                        focus_targets(&settings, Page::Layout, dpi, w, h, 0)?
+                        focus_targets_with(&settings, &[], Page::Layout, dpi, w, h, 0)?
                             .iter()
                             .any(|(hit, _)| *hit == Hit::SavedDeskSetups)
                     );
@@ -2569,13 +2504,13 @@ mod tests {
         assert!(
             !rows
                 .iter()
-                .any(|r| matches!(r.kind, RowKind::Combo | RowKind::Link))
+                .any(|r| matches!(r.kind, RowKind::Link))
         );
         assert_eq!(rows.iter().filter(|r| r.kind == RowKind::Color).count(), 3);
         let title = rows.iter().find(|r| r.text == "Show the titlebar").unwrap();
         let mut settings = Settings::default();
         for value in [0, 1, 2] {
-            assert!(title.apply_value(&mut settings, value));
+            settings.set(title.bind.unwrap(), value);
             assert_eq!(title.current_value(&settings), value);
         }
     }
@@ -2732,7 +2667,7 @@ mod tests {
                     }
                     for scroll in [0, 73, 600] {
                         let targets =
-                            focus_targets(&settings, *page, dpi, sc(760.0, dpi), h, scroll)
+                            focus_targets_with(&settings, &[], *page, dpi, sc(760.0, dpi), h, scroll)
                                 .unwrap();
                         assert_eq!(targets[0].0, Hit::Nav(*page));
                         assert_eq!(targets[0].1.top, y as f32);
@@ -2832,7 +2767,7 @@ mod tests {
                     );
                 }
                 assert!(
-                    focus_targets(&settings, Page::Layout, dpi, w, h, 0)
+                    focus_targets_with(&settings, &[], Page::Layout, dpi, w, h, 0)
                         .unwrap()
                         .iter()
                         .any(|(hit, _)| *hit == Hit::Spacing),
@@ -2907,17 +2842,11 @@ mod tests {
         for (name, theme) in [("light", Theme::light()), ("dark", Theme::dark())] {
             for page in [Page::Rollup, Page::About, Page::FolderPortals] {
                 let mut surface = Surface::new(998, 644).unwrap();
-                render_settings_state(
-                    &mut surface,
-                    &View {
+                render_settings_editor(&mut surface, &View {
                         page,
                         hover: None,
                         scroll: 0,
-                    },
-                    &settings,
-                    &theme,
-                    96,
-                )
+                    }, &settings, &[], &theme, 96, None)
                 .unwrap();
                 surface
                     .save_png(&dir.join(format!("figma-body-{name}-{page:?}.png").to_lowercase()))
@@ -2945,17 +2874,11 @@ mod tests {
                     {
                         let mut surface =
                             Surface::new(sc(width, dpi) as u32, sc(height, dpi) as u32).unwrap();
-                        render_settings_state(
-                            &mut surface,
-                            &View {
+                        render_settings_editor(&mut surface, &View {
                                 page,
                                 hover: None,
                                 scroll: 0,
-                            },
-                            &Settings::default(),
-                            &theme,
-                            dpi,
-                        )
+                            }, &Settings::default(), &[], &theme, dpi, None)
                         .unwrap();
                         surface
                             .save_png(
@@ -3103,7 +3026,7 @@ mod tests {
                     } else {
                         None
                     };
-                    render_settings(&mut s, page, hover, &theme, dpi).unwrap();
+                    render_settings_editor(&mut s, &View { page: page, hover: hover, scroll: 0 }, &Settings::default(), &[], &theme, dpi, None).unwrap();
                     let name = format!("{tname}-{dpi}-{page:?}.png").to_lowercase();
                     s.save_png(&dir.join(name)).unwrap();
                 }
@@ -3135,7 +3058,7 @@ mod tests {
                 scroll: 0,
             };
             let settings = Settings::default();
-            render_settings_state(&mut s, &v, &settings, &Theme::dark(), 96).unwrap();
+            render_settings_editor(&mut s, &v, &settings, &[], &Theme::dark(), 96, None).unwrap();
             s.save_png(&dir.join(format!("{tag}-{page:?}.png").to_lowercase()))
                 .unwrap();
         }
@@ -3174,20 +3097,15 @@ mod tests {
 
     #[test]
     fn selected_accent_bar_is_accent_coloured() {
-        let accent = Rgba::new(200, 50, 60, 255);
         for theme in [
-            Theme::dark().with_accent(accent),
-            Theme::light().with_accent(accent),
+            Theme::dark(),
+            Theme::light(),
         ] {
             let expected = [theme.accent.b, theme.accent.g, theme.accent.r, 255];
-            assert_ne!(
-                theme.accent, accent,
-                "settings use Corral amber even when Windows supplies an accent"
-            );
             for dpi in [96u32, 144, 240] {
                 for (i, page) in Page::ALL.iter().enumerate() {
                     let mut s = Surface::new(sc(828.0, dpi) as u32, sc(655.0, dpi) as u32).unwrap();
-                    render_settings(&mut s, *page, None, &theme, dpi).unwrap();
+                    render_settings_editor(&mut s, &View { page: *page, hover: None, scroll: 0 }, &Settings::default(), &[], &theme, dpi, None).unwrap();
                     let (x, y, _, h) = nav_item_rect(i, dpi, sc(655.0, dpi));
                     let p = px(&s, (x + sc(1.5, dpi) / 2 + 1) as u32, (y + h / 2) as u32);
                     assert_eq!(p, expected, "{page:?} dpi {dpi}");
@@ -3271,22 +3189,16 @@ mod tests {
             Hit::SaveBackup
         );
         // A longer list makes the page taller (it scrolls) and still draws in both themes.
-        let tall = content_height(&s, Page::Backups, dpi, w, h).unwrap();
+        let tall = content_height_with(&s, &[], Page::Backups, dpi, w, h).unwrap();
         backups::expand((1..=40).map(mk).collect());
-        assert!(content_height(&s, Page::Backups, dpi, w, h).unwrap() > tall);
+        assert!(content_height_with(&s, &[], Page::Backups, dpi, w, h).unwrap() > tall);
         for theme in [Theme::dark(), Theme::light()] {
             let mut surface = Surface::new(w as u32, h as u32).unwrap();
-            render_settings_state(
-                &mut surface,
-                &View {
+            render_settings_editor(&mut surface, &View {
                     page: Page::Backups,
                     hover: None,
                     scroll: 0,
-                },
-                &s,
-                &theme,
-                dpi,
-            )
+                }, &s, &[], &theme, dpi, None)
             .unwrap();
         }
         backups::collapse();
@@ -3391,20 +3303,11 @@ mod tests {
             )
             .unwrap();
             assert!(!s.rollup_double_click_to_toggle);
-            // Advanced retains the bound animation/scrollbar fields.
+            // Advanced retains the bound scrollbar field.
             EXPANDERS.with(|e| {
                 e.borrow_mut()
                     .insert((Page::Personalization, "Advanced"), true);
             });
-            click(
-                &mut s,
-                Page::Personalization,
-                "Animate icon movement",
-                dpi,
-                0,
-            )
-            .unwrap();
-            assert_eq!(s.icon_animation_disabled, 0);
             click(
                 &mut s,
                 Page::Personalization,
@@ -3509,12 +3412,12 @@ mod tests {
             ));
             assert_eq!(caption_bottom_padding(dpi, false), 0);
             for page in [Page::Personalization, Page::Camouflage, Page::About] {
-                let content = content_height(&settings, page, dpi, w, h).unwrap();
+                let content = content_height_with(&settings, &[], page, dpi, w, h).unwrap();
                 let max = scroll_with_bottom_padding(content, h, padding);
                 assert_eq!(max, (content + padding - h).max(0));
                 assert_eq!(
                     scroll_with_bottom_padding(content, h, caption_bottom_padding(dpi, false)),
-                    max_scroll(&settings, page, dpi, w, h).unwrap(),
+                    scroll_with_bottom_padding(content_height_with(&settings, &[], page, dpi, w, h).unwrap(), h, 0),
                 );
                 assert!(content - sc(PAGE_BOTTOM_PAD, dpi) - max <= bar.top as i32);
             }
@@ -3554,12 +3457,12 @@ mod tests {
     fn scroll_moves_hit_targets_and_is_bounded() {
         let dpi = 96;
         let s = Settings::default();
-        let h = content_height(&s, Page::Personalization, dpi, W, 655).unwrap();
+        let h = content_height_with(&s, &[], Page::Personalization, dpi, W, 655).unwrap();
         assert!(
             h > 655,
             "Personalization overflows the initial window ({h})"
         );
-        let max = max_scroll(&s, Page::Personalization, dpi, W, 655).unwrap();
+        let max = scroll_with_bottom_padding(content_height_with(&s, &[], Page::Personalization, dpi, W, 655).unwrap(), 655, 0);
         assert_eq!(max, h - 655);
         let a = centre_of(&s, Page::Personalization, "Tint icons", dpi, 0);
         let b = centre_of(&s, Page::Personalization, "Tint icons", dpi, 100);
@@ -3573,7 +3476,7 @@ mod tests {
             !m.desktop_tint_icons,
             "hit testing alone does not apply a typed tint action"
         );
-        assert_eq!(max_scroll(&s, Page::About, dpi, W, 655).unwrap(), 0);
+        assert_eq!(scroll_with_bottom_padding(content_height_with(&s, &[], Page::About, dpi, W, 655).unwrap(), 655, 0), 0);
     }
 
     #[test]
@@ -3590,8 +3493,8 @@ mod tests {
             hover: None,
             scroll: 0,
         };
-        render_settings_state(&mut a, &v, &on, &theme, dpi).unwrap();
-        render_settings_state(&mut b, &v, &off, &theme, dpi).unwrap();
+        render_settings_editor(&mut a, &v, &on, &[], &theme, dpi, None).unwrap();
+        render_settings_editor(&mut b, &v, &off, &[], &theme, dpi, None).unwrap();
         let lay = layout_page(Page::Rollup, &on, dpi, 828.0, 655.0, 0).unwrap();
         let (_, master) = lay.master.unwrap();
         let mut changes = 0;
@@ -3740,7 +3643,7 @@ mod u4_full_page_tests {
                             },
                         ]);
                         backups::set_notice(None);
-                        let maximum = max_scroll_with(&settings, &groups, page, dpi, w, h)?;
+                        let maximum = scroll_with_bottom_padding(content_height_with(&settings, &groups, page, dpi, w, h)?, h, 0);
                         for (position, scroll) in [("top", 0), ("bottom", maximum)] {
                             let mut surface = Surface::new(w as u32, h as u32)?;
                             set_focus_ring(None);
@@ -3880,7 +3783,7 @@ mod u3_page_tests {
                         assert_eq!(row.row.desc, Some("Applies to all Corrals."));
                     }
                 }
-                for (hit, r) in focus_targets(&settings, Page::Personalization, dpi, w, h, 0)? {
+                for (hit, r) in focus_targets_with(&settings, &[], Page::Personalization, dpi, w, h, 0)? {
                     assert!(r.left >= 0.0 && r.right <= w as f32, "{hit:?}: {r:?}");
                 }
                 let caption = scoped.scope.as_ref().unwrap();
@@ -3955,7 +3858,7 @@ mod u3_page_tests {
                                 });
                             }
                             let scroll = if bottom {
-                                max_scroll(&settings, page, dpi, w, h)?
+                                scroll_with_bottom_padding(content_height_with(&settings, &[], page, dpi, w, h)?, h, 0)
                             } else {
                                 0
                             };
@@ -3965,11 +3868,11 @@ mod u3_page_tests {
                                 hover: None,
                                 scroll,
                             };
-                            render_settings_state(&mut surface, &view, &settings, &theme, dpi)?;
+                            render_settings_editor(&mut surface, &view, &settings, &[], &theme, dpi, None)?;
                             surface.save_png(&dir.join(format!(
                                 "{page_name}-{theme_name}-{dpi}-{size_name}-{variant}.png"
                             )))?;
-                            for (_, r) in focus_targets(&settings, page, dpi, w, h, scroll)? {
+                            for (_, r) in focus_targets_with(&settings, &[], page, dpi, w, h, scroll)? {
                                 assert!(r.left >= 0.0 && r.right <= w as f32 + 1.0);
                             }
                         }
@@ -3996,17 +3899,11 @@ mod u3_page_tests {
                 look_pages::set_scope(Some("W".repeat(255)), vec![], true);
                 let (w, h) = (sc(760.0, dpi), sc(520.0, dpi));
                 let mut surface = Surface::new(w as u32, h as u32)?;
-                render_settings_state(
-                    &mut surface,
-                    &View {
+                render_settings_editor(&mut surface, &View {
                         page: Page::Personalization,
                         hover: None,
                         scroll: 0,
-                    },
-                    &settings,
-                    &theme,
-                    dpi,
-                )?;
+                    }, &settings, &[], &theme, dpi, None)?;
                 surface
                     .save_png(&dir.join(format!("personalization-long-scope-{name}-{dpi}.png")))?;
             }

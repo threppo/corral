@@ -290,18 +290,21 @@ impl App {
         }
     }
 
-    pub(super) fn list_insertion(&self, id: u64, grid: &super::metrics::Grid, count: usize) -> Option<i32> {
+    pub(super) fn list_insertion_mark(&self, id: u64, grid: &super::metrics::Grid, count: usize) -> Option<(usize, i32)> {
         if !grid.is_list() { return None; }
         let g = self.layout.groups.iter().find(|g| g.id == id)?;
         if !matches!(g.content, GroupContent::Items { .. }) || crate::sorting::is_maintained(g.sort_method, g.sort_flags) { return None; }
         if let Some((_, slot)) = self.list_drop_mark.filter(|(target, _)| *target == id) {
-            return Some(grid.insertion_y(slot));
+            return Some((slot, grid.insertion_y(slot)));
         }
         let Drag::Item { current, active: true, .. } = self.drag else { return None };
         let gw = self.groups.iter().find(|g| g.id == id)?;
         let origin = self.to_screen((gw.rect.left, gw.rect.top));
         let point = (current.0 - origin.0, current.1 - origin.1);
-        grid.body.contains(point.0, point.1).then(|| grid.insertion_y(grid.drop_slot(point, count)))
+        grid.body.contains(point.0, point.1).then(|| {
+            let slot = grid.drop_slot(point, count);
+            (slot, grid.insertion_y(slot))
+        })
     }
 
     pub(super) fn scroll_item_into_view(&mut self, id: u64, slot: usize) {

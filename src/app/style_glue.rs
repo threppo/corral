@@ -295,7 +295,7 @@ impl App {
         });
         color_state::write_pair(
             &disk, &to_save, next_settings.as_ref(),
-            &mut |l| model::save(&layout_path, l).map_err(|e| e.to_string()),
+            &mut |l| self.layout_recovery.save(&layout_path, l).map_err(|e| e.to_string()),
             &mut |s| settings::save(&settings_path, s).map_err(|e| e.to_string()),
         )?;
         // Published: the live pair takes the same edit.
@@ -363,7 +363,7 @@ impl App {
         let (live_layout, live_settings) = plan_style_action(
             (&stored_layout, &stored_settings), action, &mut backup,
             &mut || settings::load_with_backup(&settings_path_read),
-            &mut |l| model::save(&layout_path, l).map_err(|e| format!("Saving group style failed: {e}")),
+            &mut |l| self.layout_recovery.save(&layout_path, l).map_err(|e| format!("Saving group style failed: {e}")),
             &mut |s| settings::save(&settings_path, s).map_err(|e| format!("Saving group style failed: {e}")),
         )?;
         // The live pair keeps what is not saved (runtime-only layout state): apply the same action to it.

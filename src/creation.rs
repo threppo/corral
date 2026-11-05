@@ -116,6 +116,7 @@ pub fn is_touch_or_pen(extra_info: isize) -> bool {
 pub enum DrawButton {
     Left,
     Right,
+    #[allow(dead_code)] // Records the spec rule that the middle button never starts a draw.
     Middle,
 }
 

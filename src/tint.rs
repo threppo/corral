@@ -103,12 +103,6 @@ pub fn use_for_settings_only() {
     engine::set_settings_only();
 }
 
-/// Camouflage no longer samples the wallpaper (releases what only it needed).
-#[allow(dead_code)]
-pub fn set_camouflage_wanted(wanted: bool) {
-    engine::set_camouflage_wanted(wanted);
-}
-
 /// The Camouflage preview or Personalization sample opened (true) or closed (false).
 pub fn set_preview_visible(visible: bool) {
     engine::set_preview_visible(visible);

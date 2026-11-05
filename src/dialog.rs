@@ -1,6 +1,5 @@
 //! Shared Corral modal dialogs. Geometry and drawing are shared by production and offscreen QA.
 //! No settings, snapshot or desktop operations are performed here.
-#![allow(dead_code)]
 
 use crate::render::{self, Ctx, RectF, Surface};
 use crate::settings_ui::kit::{
@@ -471,50 +470,6 @@ fn draw_footer_state(
     }
     Ok(())
 }
-/// Render a dialog without creating a window. Used by adapter goldens and production painting.
-pub fn draw_spec(ctx: &Ctx, spec: &DialogSpec, dpi: u32, light: bool) -> Result<()> {
-    let l = layout(spec, spec.width);
-    draw_contents(
-        ctx,
-        spec,
-        &l,
-        l.height,
-        0.,
-        None,
-        false,
-        None,
-        None,
-        dpi,
-        &Theme::new(light),
-        true,
-    )
-}
-/// Preview the same inline validation and focus state used by the modal renderer.
-pub fn draw_spec_state(
-    ctx: &Ctx,
-    spec: &DialogSpec,
-    dpi: u32,
-    light: bool,
-    error: Option<&str>,
-    focus: Option<Focus>,
-    focus_visible: bool,
-) -> Result<()> {
-    let l = layout(spec, spec.width);
-    draw_contents(
-        ctx,
-        spec,
-        &l,
-        l.height,
-        0.,
-        focus,
-        focus_visible,
-        None,
-        error,
-        dpi,
-        &Theme::new(light),
-        true,
-    )
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
     Field,
@@ -555,7 +510,7 @@ pub fn advance_focus(spec: &DialogSpec, current: Focus, reverse: bool) -> Focus 
     let i = order.iter().position(|v| *v == current).unwrap_or(0);
     order[(i + order.len() + if reverse { order.len() - 1 } else { 1 }) % order.len()]
 }
-fn draw_contents(
+pub(crate) fn draw_contents(
     ctx: &Ctx,
     spec: &DialogSpec,
     l: &DialogLayout,
@@ -1825,7 +1780,7 @@ mod tests {
                         Surface::new((l.width * s).round() as u32, (l.height * s).round() as u32)
                             .unwrap();
                     surface
-                        .draw(|ctx| draw_spec(ctx, &spec, dpi, light))
+                        .draw(|ctx| draw_contents(ctx, &spec, &crate::dialog::layout(&spec, (&spec).width), crate::dialog::layout(&spec, (&spec).width).height, 0., None, false, None, None, dpi, &crate::settings_ui::kit::theme::Theme::new(light), true))
                         .unwrap();
                     surface
                         .save_png(&dir.join(format!(

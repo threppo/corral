@@ -140,6 +140,11 @@ impl ColorPage {
     pub fn globals(&self) -> &Globals {
         &self.globals
     }
+    /// A Settings save merged newer stored globals. Refresh those underneath an
+    /// open draft without ending its session or changing the per-Corral cache.
+    pub fn refresh_globals(&mut self, globals: Globals) {
+        self.globals = globals;
+    }
     pub fn corrals(&self) -> &[CorralInfo] {
         &self.corrals
     }
@@ -435,8 +440,5 @@ impl Throttle {
     pub fn flushed(&mut self, now_ms: u64) {
         self.pending = false;
         self.last = Some(now_ms);
-    }
-    pub fn pending(&self) -> bool {
-        self.pending
     }
 }

@@ -32,11 +32,6 @@ pub struct Theme {
     pub on_accent: Rgba,
     pub focus: Rgba,
     pub danger: Rgba,
-    /// Explicit semantic aliases retained for the window adapter.
-    pub text_primary: Rgba,
-    pub text_secondary: Rgba,
-    pub border_default: Rgba,
-    pub text_link: Rgba,
 }
 impl Theme {
     pub const fn new(light: bool) -> Self {
@@ -65,10 +60,6 @@ impl Theme {
                 on_accent: rgb(0xFFFFFF),
                 focus: rgb(0x14161A),
                 danger: rgb(0xC4382E),
-                text_primary: rgb(0x14161A),
-                text_secondary: rgb(0x494E58),
-                border_default: rgb(0xD7DADF),
-                text_link: rgb(0x8F5B22),
             }
         } else {
             Self {
@@ -95,10 +86,6 @@ impl Theme {
                 on_accent: rgb(0x14161A),
                 focus: rgb(0xFFFFFF),
                 danger: rgb(0xF08A80),
-                text_primary: rgb(0xF6F7F8),
-                text_secondary: rgb(0xB4B9C2),
-                border_default: rgb(0x33373F),
-                text_link: rgb(0xEAB477),
             }
         }
     }
@@ -115,23 +102,18 @@ impl Theme {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
-    PageTitle,
     DialogTitle,
-    Section,
     Body,
     BodyStrong,
     Caption,
-    Group,
 }
 impl Type {
     pub fn metrics(self) -> (f32, f32, u16) {
         match self {
-            Self::PageTitle => (28., 36., 600),
             Self::DialogTitle => (20., 28., 600),
-            Self::Section | Self::BodyStrong => (14., 20., 600),
+            Self::BodyStrong => (14., 20., 600),
             Self::Body => (14., 20., 400),
             Self::Caption => (12., 16., 400),
-            Self::Group => (12., 16., 600),
         }
     }
     pub fn style(self, dpi: u32, color: Rgba) -> TextStyle<'static> {
@@ -172,8 +154,8 @@ mod tests {
     fn ramp_scales_without_rounding_type_sizes() {
         for dpi in [96, 120, 144, 240] {
             assert_eq!(
-                Type::PageTitle.style(dpi, rgb(0)).size_px,
-                28. * dpi as f32 / 96.
+                Type::DialogTitle.style(dpi, rgb(0)).size_px,
+                20. * dpi as f32 / 96.
             );
             assert_eq!(Type::Caption.metrics(), (12., 16., 400));
         }

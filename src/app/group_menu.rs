@@ -391,7 +391,7 @@ impl App {
             None => next.clone(),
         };
         for g in &mut layout.groups { g.style.migrate_tint_source(self.settings.color, self.settings.desktop_tint_icons_color); }
-        model::save(&self.opts.layout_path, &layout)
+        self.layout_recovery.save(&self.opts.layout_path, &layout)
     }
 
     /// The on-screen area for a body rect of `monitor`, in DIPs of its work area (room for the strip kept
@@ -563,7 +563,6 @@ impl App {
         if !self.commit_tab_edit(doc) { return }
         self.refresh_tabs();
     }
-
 
     /// Remove a group from the layout ("Remove this Folder Portal": no
     /// confirmation from the menu). Files are never touched; a removed Corral's members become loose.
@@ -1352,7 +1351,7 @@ mod u4_prompt_tests {
         let spec=super::combine_tab_spec("Projects", 1, "Downloads", 1);let lay=crate::dialog::layout(&spec,spec.width);
         for light in [true,false]{for dpi in [96u32,120,144,240]{let scale=dpi as f32/96.0;
             let mut surface=Surface::new((lay.width*scale).round()as u32,(lay.height*scale).round()as u32)?;
-            surface.draw(|ctx|crate::dialog::draw_spec(ctx,&spec,dpi,light))?;
+            surface.draw(|ctx|crate::dialog::draw_contents(ctx, &spec, &crate::dialog::layout(&spec, (&spec).width), crate::dialog::layout(&spec, (&spec).width).height, 0., None, false, None, None, dpi, &crate::settings_ui::kit::theme::Theme::new(light), true))?;
             surface.save_png(&dir.join(format!("combine-tabs-{}-{dpi}.png",if light{"light"}else{"dark"})))?;
         }}Ok(())
     }

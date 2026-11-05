@@ -19,6 +19,19 @@ use windows::core::{PCWSTR, w};
 use super::selection::{self, Home};
 use super::{APP, App, Drag, DropSite, OLE_DRAG_RUNNING, PENDING_OLE_DRAG, PendingPlacement, log};
 
+/// A group needs painting only when its mark appears, disappears, changes slot or moves in pixels.
+/// Keep all targets: overlapping group bodies can each draw a mark under the existing paint rule.
+fn changed_insertion_groups(
+    old: &std::collections::HashMap<u64, (usize, i32)>,
+    next: &std::collections::HashMap<u64, (usize, i32)>,
+) -> Vec<u64> {
+    let mut ids: Vec<_> = old.keys().chain(next.keys()).copied()
+        .filter(|id| old.get(id) != next.get(id)).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum DeferredDrop {
     CreatePortal { paths: Vec<String>, screen: (i32, i32) },
@@ -658,8 +671,22 @@ impl App {
     }
 
     fn render_list_insertions(&mut self) {
-        let indices: Vec<_> = self.groups.iter().enumerate().filter(|(_, g)| self.group_view(g.id) != crate::view_state::View::Icons)
-            .map(|(i, _)| i).collect();
+        let mut marks = std::collections::HashMap::new();
+        for gw in &self.groups {
+            if self.group_view(gw.id) == crate::view_state::View::Icons { continue; }
+            let Some(group) = self.layout.groups.iter().find(|g| g.id == gw.id) else { continue };
+            if self.settings.disabled || !crate::tabs::body_visible(&self.layout.groups, group) || !self.page_group_visible(group) { continue; }
+            let geo = self.group_geometry(group);
+            if geo.rolled { continue; }
+            let count = self.group_members(group).len();
+            let body = geo.full_body.offset(-geo.union.left, -geo.union.top);
+            let grid = self.group_paint_grid(group, geo.dpi, body, count);
+            if let Some(mark) = self.list_insertion_mark(group.id, &grid, count) { marks.insert(group.id, mark); }
+        }
+        // Normal paints (scrolls, tabs, Ranges and display changes) update this snapshot too.
+        let changed = changed_insertion_groups(&self.painted_list_insertions, &marks);
+        self.painted_list_insertions.retain(|id, _| self.groups.iter().any(|g| g.id == *id));
+        let indices: Vec<_> = self.groups.iter().enumerate().filter(|(_, g)| changed.contains(&g.id)).map(|(i, _)| i).collect();
         for index in indices { self.render_group(index); }
     }
 
@@ -1138,6 +1165,23 @@ fn on_icon(in_cell: (i32, i32), cell: (i32, i32), icon: i32, dpi: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insertion_repaints_only_changed_groups_and_clears_on_exit() {
+        let marks = |entries: &[(u64, (usize, i32))]| entries.iter().copied().collect();
+        let empty = marks(&[]);
+        let a = marks(&[(1, (2, 48))]);
+        assert_eq!(changed_insertion_groups(&empty, &a), vec![1]);
+        assert!(changed_insertion_groups(&a, &a).is_empty());
+        assert_eq!(changed_insertion_groups(&a, &marks(&[(1, (3, 72))])), vec![1]);
+        assert_eq!(changed_insertion_groups(&a, &marks(&[(1, (2, 47))])), vec![1]);
+        assert_eq!(changed_insertion_groups(&a, &marks(&[(2, (0, 12))])), vec![1, 2]);
+        let overlap = marks(&[(1, (2, 48)), (2, (0, 12))]);
+        assert_eq!(changed_insertion_groups(&a, &overlap), vec![2]);
+        assert_eq!(changed_insertion_groups(&overlap, &empty), vec![1, 2]);
+        assert_eq!(changed_insertion_groups(&a, &empty), vec![1]);
+        assert!(changed_insertion_groups(&empty, &empty).is_empty());
+    }
 
     #[test]
     fn only_the_icon_of_a_cell_is_a_drop_onto_target() {

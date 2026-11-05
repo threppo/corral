@@ -239,13 +239,14 @@ fn first_edit_in_an_adjusted_state_creates_a_setup_and_leaves_the_base_unchanged
 }
 
 #[test]
-fn negative_origins_are_normalized_before_exact_comparison() {
+fn normalized_offsets_match_independently_of_runtime_work_origins() {
     let make = |dx, dy| vec![
-        Monitor { name: "left".into(), bounds: Rect::new(-2560+dx, -1440+dy, dx, dy), work: Rect::new(-2560+dx, -1440+dy, dx, dy), dpi: 96 },
-        Monitor { name: "right".into(), bounds: Rect::new(dx, dy, 2560+dx, 1440+dy), work: Rect::new(dx, dy, 2560+dx, 1440+dy), dpi: 96 }];
-    let saved = fallback_monitors(&make(0, 0));
-    let current = fallback_monitors(&make(500, -1000));
-    assert_eq!(decide(&current, &[setup("s", saved, 0)], None).case, Case::Exact);
+        MonitorState { size_px: (2560, 1440), scale_pct: 100, offset_px: (0, 0),
+            work: Rect::new(-2560 + dx, -1440 + dy, dx, dy), ..Default::default() },
+        MonitorState { size_px: (2560, 1440), scale_pct: 100, offset_px: (2560, 1440), primary: true,
+            work: Rect::new(dx, dy, 2560 + dx, 1440 + dy), ..Default::default() },
+    ];
+    assert_eq!(decide(&make(500, -1000), &[setup("s", make(0, 0), 0)], None).case, Case::Exact);
 }
 
 #[test]
@@ -570,6 +571,31 @@ fn legacy_backup_is_taken_from_bak_when_the_primary_file_does_not_parse() {
     assert_eq!(std::fs::read(migration_backup_path(&path)).unwrap(), bytes);
     // the save replaced .bak with the broken primary, but the byte copy of the legacy data survives
     assert_eq!(std::fs::read(crate::model::backup_path(&path)).unwrap(), b"{ broken");
+}
+
+#[test]
+fn migration_backup_preserves_old_bytes_and_clean_saves_stop_reading() {
+    let root = std::env::temp_dir().join("corral-perf-migration")
+        .join(format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&root).unwrap();
+    let old_path = root.join("old.json");
+    let old = b"\xef\xbb\xbf{ \"profiles\" : {}, \"active_profile\" : \"old\" }\r\n";
+    std::fs::write(&old_path, old).unwrap();
+    crate::model::save(&old_path, &Layout::new()).unwrap();
+    assert_eq!(std::fs::read(migration_backup_path(&old_path)).unwrap(), old);
+    crate::model::save(&old_path, &Layout::new()).unwrap();
+    assert_eq!(std::fs::read(migration_backup_path(&old_path)).unwrap(), old);
+
+    let clean_path = root.join("clean.json");
+    let layout = Layout::new();
+    std::fs::write(&clean_path, serde_json::to_vec(&layout).unwrap()).unwrap();
+    std::fs::write(crate::model::backup_path(&clean_path), b"{}").unwrap();
+    MIGRATION_READS.with(|n| n.set(0));
+    crate::model::save(&clean_path, &layout).unwrap();
+    assert_eq!(MIGRATION_READS.with(|n| n.get()), 2);
+    crate::model::save(&clean_path, &layout).unwrap();
+    assert_eq!(MIGRATION_READS.with(|n| n.get()), 2, "second save must not re-read either migration candidate");
+    assert!(!migration_backup_path(&clean_path).exists());
 }
 
 #[test]

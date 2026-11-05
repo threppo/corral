@@ -7,6 +7,7 @@ use crate::shell_menu::ShellMenu;
 use crate::style;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HGDIOBJ};
@@ -92,10 +93,15 @@ impl RasterKey {
 struct RasterCache<T> {
     owner: isize,
     entries: HashMap<RasterKey, Option<Rc<T>>>,
+    demand_fingerprint: Option<u64>,
 }
 
 impl<T> RasterCache<T> {
-    fn new() -> Self { Self { owner: 0, entries: HashMap::new() } }
+    fn new() -> Self { Self { owner: 0, entries: HashMap::new(), demand_fingerprint: None } }
+
+    fn demand_current(&self, owner: isize, fingerprint: u64) -> bool {
+        self.owner == owner && self.demand_fingerprint == Some(fingerprint)
+    }
 
     fn retain(&mut self, owner: isize, wanted: &HashSet<RasterKey>) {
         if self.owner != owner { self.reset(owner); }
@@ -105,7 +111,30 @@ impl<T> RasterCache<T> {
     fn reset(&mut self, owner: isize) {
         self.owner = owner;
         self.entries.clear();
+        self.demand_fingerprint = None;
     }
+}
+
+/// Hash borrowed inputs, without resolving each member against the whole item list or allocating
+/// case-folded RasterKeys. Effective DPI/size/policy cover all their writers (including zoom/views).
+/// All tabs and Ranges retain demand, so visibility alone intentionally does not invalidate it.
+fn raster_demand_fingerprint<'a>(
+    groups: impl IntoIterator<Item = (u64, u32, u32, crate::icon_overlay::Policy, &'a GroupContent)>,
+    items: impl IntoIterator<Item = (&'a str, Option<u64>)>,
+) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let mut count = 0usize;
+    for (id, dpi, size, policy, content) in groups {
+        (id, dpi, size, policy).hash(&mut hash);
+        match content {
+            GroupContent::Items { items } => { 0u8.hash(&mut hash); items.hash(&mut hash); }
+            GroupContent::Portal { .. } => { 1u8.hash(&mut hash); }
+        }
+        count += 1;
+    }
+    count.hash(&mut hash);
+    for item in items { item.hash(&mut hash); }
+    hash.finish()
 }
 
 thread_local! {
@@ -225,17 +254,27 @@ impl App {
         self.retain_group_icon_rasters();
     }
 
-    /// Layout-only demand: inactive tabs/pages still own their rasters, portals
-    /// do not. Dropping the last member/group at a DPI releases those buffers.
+    /// Demand includes inactive tabs/Ranges and current Gate listings.
+    /// Dropping the last member/group at a DPI releases those buffers.
     /// This never enumerates the Shell or runs rules/file-transfer operations.
     pub(super) fn retain_group_icon_rasters(&self) {
+        let owner = self.surface_hwnd.0 as isize;
+        let fingerprint = raster_demand_fingerprint(self.layout.groups.iter().map(|group| {
+            let dpi = self.group_metrics_dpi(group.id);
+            (group.id, dpi, self.group_icon_px_of(group.id, dpi), self.icon_policy_of(group.id), &group.content)
+        }), self.items.iter().map(|item| (item.shell.parsing_name.as_str(), item.gate)));
+        if GROUP_RASTERS.with(|cache| cache.borrow().demand_current(owner, fingerprint)) { return; }
         let wanted: HashSet<_> = self.layout.groups.iter().flat_map(|group| {
             let policy = self.icon_policy_of(group.id);
             let dpi = self.group_metrics_dpi(group.id);
             let size = self.group_icon_px_of(group.id, dpi);
             self.group_members(group).into_iter().map(move |item| RasterKey::new(&item.shell.parsing_name, dpi, size, policy))
         }).collect();
-        GROUP_RASTERS.with(|cache| cache.borrow_mut().retain(self.surface_hwnd.0 as isize, &wanted));
+        GROUP_RASTERS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.retain(owner, &wanted);
+            cache.demand_fingerprint = Some(fingerprint);
+        });
     }
 
     pub(super) fn group_icon_bitmap(&self, item: &Item, dpi: u32, group_id: u64) -> Option<Rc<shell::IconBitmap>> {
@@ -247,7 +286,8 @@ impl App {
 
     /// Show a shell item menu; "rename" is not delegated to the shell (Corral renders items).
     pub(super) fn show_item_menu(&mut self, owner: HWND, mut names: Vec<String>, client_point: (i32, i32)) {
-        names.retain(|n| self.name_actionable(n));
+        let covered = self.covered_loose_set();
+        names.retain(|n| self.name_actionable_in(n, &covered));
         if names.is_empty() {
             return;
         }
@@ -272,7 +312,8 @@ impl App {
         let screen = self.to_screen(client_point);
         if let Some(id) = Self::track(&menu, owner, screen) {
             // The modal menu pumps messages: geometry can change while it is open.
-            if names.iter().any(|n| !self.name_actionable(n)) { return; }
+            let covered = self.covered_loose_set();
+            if names.iter().any(|n| !self.name_actionable_in(n, &covered)) { return; }
             if any_manual && id == MENU_ROUND_UP_DECIDE {
                 self.let_round_up_decide(&names);
                 return;
@@ -326,7 +367,9 @@ impl App {
     }
 
     fn invoke_verb_on(&mut self, names: &[String], verb: &str) {
-        if names.is_empty() || names.iter().any(|n| !self.name_actionable(n)) {
+        if names.is_empty() { return; }
+        let covered = self.covered_loose_set();
+        if names.iter().any(|n| !self.name_actionable_in(n, &covered)) {
             return;
         }
         let Ok(menu) = ShellMenu::for_items(self.surface_hwnd, names) else { return };
@@ -885,6 +928,42 @@ mod new_name_tests {
 mod raster_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn raster_demand_tracks_membership_listing_metrics_policy_and_cache_reset() {
+        let content = GroupContent::Items { items: vec!["a".into()] };
+        let changed = GroupContent::Items { items: vec!["b".into()] };
+        let portal = GroupContent::Portal { path: "QA".into() };
+        let policy = crate::icon_overlay::Policy(0);
+        let fingerprint = |id, dpi, size, policy, content: &GroupContent, items: &[(&str, Option<u64>)]|
+            raster_demand_fingerprint([(id, dpi, size, policy, content)], items.iter().copied());
+        let listing = [("a", None), ("b", Some(2))];
+        let base = fingerprint(1, 96, 32, policy, &content, &listing);
+        assert_eq!(base, fingerprint(1, 96, 32, policy, &content, &listing));
+        assert_ne!(base, fingerprint(2, 96, 32, policy, &content, &listing));
+        assert_ne!(base, fingerprint(1, 144, 32, policy, &content, &listing));
+        assert_ne!(base, fingerprint(1, 96, 48, policy, &content, &listing));
+        assert_ne!(base, fingerprint(1, 96, 32, crate::icon_overlay::Policy(1), &content, &listing));
+        assert_ne!(base, fingerprint(1, 96, 32, policy, &changed, &listing));
+        assert_ne!(base, fingerprint(1, 96, 32, policy, &portal, &listing));
+        assert_ne!(base, fingerprint(1, 96, 32, policy, &content, &listing[..1]));
+        assert_ne!(base, fingerprint(1, 96, 32, policy, &content, &[("a", Some(1)), ("b", Some(2))]));
+        assert_ne!(base, fingerprint(1, 96, 32, policy, &content, &[("renamed", None), ("b", Some(2))]));
+        let mut cache = RasterCache::<()>::new();
+        let mut rebuilds = 0;
+        for _ in 0..100 {
+            if !cache.demand_current(1, base) {
+                rebuilds += 1;
+                cache.retain(1, &HashSet::new());
+                cache.demand_fingerprint = Some(base);
+            }
+        }
+        assert_eq!(rebuilds, 1);
+        assert!(!cache.demand_current(2, base));
+        assert!(!cache.demand_current(1, base.wrapping_add(1)));
+        cache.reset(1);
+        assert!(!cache.demand_current(1, base));
+    }
 
     fn key(dpi: u32) -> RasterKey {
         RasterKey::new("QA.lnk", dpi, dpi / 3, crate::icon_overlay::Policy(crate::icon_overlay::DEFAULT_MASK))

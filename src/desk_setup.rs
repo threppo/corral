@@ -1,6 +1,6 @@
 //! Saved desk setups. Independent policy from desk-setups-spec sections 2-5.
 //! OS reads live in `windows`; all pairing, restore and learning below are pure.
-#![allow(dead_code)]
+
 use crate::{geometry::{Monitor, Rect}, model::{Layout, LoosePosition, RollState}};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -95,10 +95,6 @@ pub fn normalize(mut monitors:Vec<MonitorState>)->Vec<MonitorState> {
     let duplicates:Vec<_>=monitors.iter().enumerate().filter(|(i,m)|m.id.serial_hash.is_some() && monitors.iter().enumerate().any(|(j,n)|i!=&j && m.id.model==n.id.model && m.id.serial_hash==n.id.serial_hash)).map(|(i,_)|i).collect();
     for i in duplicates {monitors[i].id.serial_hash=None;}
     monitors
-}
-pub fn fallback_monitors(monitors:&[Monitor])->Vec<MonitorState> {
-    let x=monitors.iter().map(|m|m.bounds.left).min().unwrap_or(0);let y=monitors.iter().map(|m|m.bounds.top).min().unwrap_or(0);
-    monitors.iter().map(|m|MonitorState {size_px:(m.bounds.width().max(0) as u32,m.bounds.height().max(0) as u32),scale_pct:((u64::from(m.dpi)*100+48)/96) as u32,offset_px:(m.bounds.left.saturating_sub(x),m.bounds.top.saturating_sub(y)),primary:m.bounds.left==0&&m.bounds.top==0,gdi_name:m.name.clone(),work:m.work,..Default::default()}).collect()
 }
 pub fn read_monitors(monitors:&[Monitor])->Vec<MonitorState> {normalize(windows::read_monitors(monitors))}
 fn serial_ok(a:&MonitorState,b:&MonitorState)->bool { !matches!((&a.id.serial_hash,&b.id.serial_hash),(Some(x),Some(y)) if x!=y) }
@@ -281,16 +277,31 @@ fn has_legacy_keys(bytes:&[u8])->bool {
 }
 /// A failed copy prevents publication; create_new means a prior backup is never overwritten.
 pub fn ensure_migration_backup(path:&Path)->io::Result<()> {
+    // A clean path stays clean for this process's saves. Do not remember read failures:
+    // a temporarily unreadable legacy file still needs its byte backup when it becomes readable.
+    static CLEAN: std::sync::OnceLock<std::sync::Mutex<BTreeSet<PathBuf>>> = std::sync::OnceLock::new();
+    let key=std::path::absolute(path).unwrap_or_else(|_|path.to_path_buf());
+    let mut clean=CLEAN.get_or_init(Default::default).lock().unwrap_or_else(|e|e.into_inner());
+    if clean.contains(&key){return Ok(())}
     let backup=migration_backup_path(path);
     if backup.is_file(){return Ok(())}
     // The legacy data comes from the primary file, or from `.bak` when the primary does not parse (load fell back to it).
-    let source=[path.to_path_buf(),crate::model::backup_path(path)].into_iter().find_map(|p|std::fs::read(&p).ok().filter(|b|has_legacy_keys(b)));
-    let Some(bytes)=source else {return Ok(())};
+    let mut readable=true;
+    let source=[path.to_path_buf(),crate::model::backup_path(path)].into_iter().find_map(|p| {
+        #[cfg(test)] MIGRATION_READS.with(|n|n.set(n.get()+1));
+        match std::fs::read(&p) {
+            Ok(bytes)=>has_legacy_keys(&bytes).then_some(bytes),
+            Err(e)=>{if e.kind()!=io::ErrorKind::NotFound {readable=false;}None}
+        }
+    });
+    let Some(bytes)=source else {if readable {clean.insert(key);}return Ok(())};
     if backup.exists(){return Err(io::Error::other("migration backup path is not a file"))}
     use std::io::Write;
     let mut f=match std::fs::OpenOptions::new().write(true).create_new(true).open(&backup){Ok(f)=>f,Err(e)if e.kind()==io::ErrorKind::AlreadyExists=>return Ok(()),Err(e)=>return Err(e)};
     if let Err(e)=f.write_all(&bytes).and_then(|_|f.sync_all()){drop(f);let _=std::fs::remove_file(&backup);return Err(e)}Ok(())
 }
+#[cfg(test)]
+thread_local! {static MIGRATION_READS: std::cell::Cell<usize> = const {std::cell::Cell::new(0)};}
 /// Adopt the live layout after Corral was not tracking setups (`LayoutPreserve` 0/1): treated as a user edit (spec 3.2).
 pub fn adopt(layout:&mut Layout,current:&[MonitorState],now:i64)->bool {
     migrate(layout);

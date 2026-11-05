@@ -259,13 +259,6 @@ impl Drop for DpiGuard {
     }
 }
 
-/// Pick a COLORREF (0x00BBGGRR) from any monitor. Esc, right click, lost capture, or failure cancels.
-/// Must run on the owner's UI thread, without holding a borrow of settings/editor window state:
-/// this function dispatches a nested modal message loop. The owner is disabled for its duration.
-pub fn pick(owner: HWND) -> Option<u32> {
-    pick_with_preview(owner, |_| {})
-}
-
 /// Report each changed hovered colour without holding picker state across the callback.
 /// The caller restores its previous model when this returns None, and persists only on Some.
 /// Sampling stays frozen at activation, so recolouring a Corral does not feed into subsequent picks.
