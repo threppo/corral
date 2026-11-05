@@ -19,16 +19,16 @@
 //!   different filesystem parents, so mixed selections yield `Err` (the caller may fall back to a
 //!   per-parent menu or the first item's parent).
 
-use std::ffi::c_void;
 use std::mem::size_of;
 
-use windows::Win32::Foundation::{E_FAIL, E_INVALIDARG, HWND, LPARAM, LRESULT, POINT, WPARAM};
-use windows::Win32::System::Com::{CoTaskMemFree, IBindCtx};
-use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+use crate::shell_items_pidl::bind_items;
+
+use windows::Win32::Foundation::{E_INVALIDARG, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::System::Com::IBindCtx;
 use windows::Win32::UI::Shell::{
-    BHID_SFObject, CMINVOKECOMMANDINFOEX, ILClone, ILFindLastID, ILFree, ILIsEqual, ILRemoveLastID, IContextMenu,
-    IContextMenu2, IContextMenu3, IShellFolder, IShellItem, SHBindToParent, SHCreateItemFromParsingName,
-    SHGetDesktopFolder, SHParseDisplayName,
+    BHID_SFObject, CMINVOKECOMMANDINFOEX, IContextMenu,
+    IContextMenu2, IContextMenu3, IShellFolder, IShellItem, SHCreateItemFromParsingName,
+    SHGetDesktopFolder,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetForegroundWindow, HMENU,
@@ -64,54 +64,8 @@ pub struct ShellMenu {
     gate_new_submenu: Option<HMENU>,
 }
 
-/// Owns an absolute PIDL allocated by the Shell.
-struct Pidl(*mut ITEMIDLIST);
-
-impl Drop for Pidl {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { CoTaskMemFree(Some(self.0 as *const c_void)) };
-        }
-    }
-}
-
-/// Owns a PIDL cloned with `ILClone` (freed with `ILFree`).
-struct ClonedPidl(*mut ITEMIDLIST);
-
-impl Drop for ClonedPidl {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { ILFree(Some(self.0 as *const ITEMIDLIST)) };
-        }
-    }
-}
-
-fn err(message: &str) -> Error {
-    Error::new(E_FAIL, message)
-}
-
 fn invalid(message: &str) -> Error {
     Error::new(E_INVALIDARG, message)
-}
-
-fn parse(name: &str) -> Result<Pidl> {
-    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
-    unsafe { SHParseDisplayName(&HSTRING::from(name), None::<&IBindCtx>, &mut pidl, 0, None)? };
-    if pidl.is_null() {
-        return Err(err("SHParseDisplayName returned no item"));
-    }
-    Ok(Pidl(pidl))
-}
-
-/// Parent-folder PIDL of an absolute PIDL (a clone with the last ID removed).
-fn parent_pidl(pidl: &Pidl) -> Result<ClonedPidl> {
-    let clone = unsafe { ILClone(pidl.0 as *const ITEMIDLIST) };
-    if clone.is_null() {
-        return Err(err("ILClone failed"));
-    }
-    let clone = ClonedPidl(clone);
-    unsafe { let _ = ILRemoveLastID(Some(clone.0)); }
-    Ok(clone)
 }
 
 /// Remove the `HiddenShellMenuEntries` labels from Corral's Shell menus (host spec 6).
@@ -165,32 +119,11 @@ impl ShellMenu {
 
     /// As [`ShellMenu::for_items`], with `shift` adding `CMF_EXTENDEDVERBS`.
     pub fn for_items_ex(owner: HWND, parsing_names: &[String], shift: bool) -> Result<ShellMenu> {
-        if parsing_names.is_empty() {
-            return Err(invalid("no items given for the context menu"));
-        }
-        let pidls = parsing_names.iter().map(|n| parse(n)).collect::<Result<Vec<_>>>()?;
-
-        let first_parent = parent_pidl(&pidls[0])?;
-        for (i, pidl) in pidls.iter().enumerate().skip(1) {
-            let parent = parent_pidl(pidl)?;
-            if !unsafe { ILIsEqual(first_parent.0 as *const ITEMIDLIST, parent.0 as *const ITEMIDLIST) }.as_bool() {
-                return Err(invalid(&format!(
-                    "items do not share a parent folder (\"{}\" differs from \"{}\"); a combined menu is not possible",
-                    parsing_names[i], parsing_names[0]
-                )));
-            }
-        }
-
-        // Bind to the parent once (from the first PIDL); children are the last ID of each.
-        let folder: IShellFolder = unsafe { SHBindToParent::<IShellFolder>(pidls[0].0 as *const ITEMIDLIST, None)? };
-
-        let children: Vec<*const ITEMIDLIST> =
-            pidls.iter().map(|p| unsafe { ILFindLastID(p.0 as *const ITEMIDLIST) } as *const ITEMIDLIST).collect();
-        if children.iter().any(|c| c.is_null()) {
-            return Err(err("could not determine child item identifiers"));
-        }
-
-        let ctx: IContextMenu = unsafe { folder.GetUIObjectOf(owner, &children, None)? };
+        let items = bind_items(
+            parsing_names, "no items given for the context menu", "a combined menu is not possible",
+        )?;
+        let children = items.children()?;
+        let ctx: IContextMenu = unsafe { items.folder.GetUIObjectOf(owner, &children, None)? };
 
         let menu = unsafe { CreatePopupMenu()? };
         let mut flags = CMF_NORMAL | CMF_CANRENAME;

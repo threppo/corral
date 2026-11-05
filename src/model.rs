@@ -6,8 +6,12 @@
 use crate::geometry::Rect;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+
+pub use crate::persistence::backup_path;
 
 pub const LAYOUT_VERSION: u32 = 1;
 
@@ -800,12 +804,6 @@ pub fn load_with_backup(path: &Path) -> Result<Layout, LoadError> {
     load(path).or_else(|primary| load(&backup_path(path)).map_err(|_| primary))
 }
 
-pub fn backup_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".bak");
-    PathBuf::from(name)
-}
-
 /// Atomic save: write `<path>.tmp`, flush to disk, keep the previous file as `<path>.bak`, rename.
 pub fn save(path: &Path, layout: &Layout) -> io::Result<()> {
     // desk-setups-spec 5.4: never replace old keys until the byte backup succeeded.
@@ -817,21 +815,8 @@ pub fn save(path: &Path, layout: &Layout) -> io::Result<()> {
         crate::desk_setup::migrate(&mut migrated);
         std::borrow::Cow::Owned(migrated)
     };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = PathBuf::from(temp);
-    {
-        let mut file = fs::File::create(&temp)?;
-        file.write_all(serde_json::to_string_pretty(layout.as_ref()).map_err(io::Error::other)?.as_bytes())?;
-        file.sync_all()?;
-    }
-    if path.exists() {
-        fs::copy(path, backup_path(path))?;
-    }
-    fs::rename(&temp, path)
+    let bytes = serde_json::to_string_pretty(layout.as_ref()).map(String::into_bytes).map_err(io::Error::other);
+    crate::persistence::write_atomic_with_backup(path, bytes)
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ pub const AUTO_HIDE_IDLE_CHOICES: &[(&str, i64)] = &[
 ];
 
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -1041,21 +1041,7 @@ pub fn save(path: &Path, settings: &Settings) -> io::Result<()> {
         // the copy fails nothing is written.
         round_up_store::backup_settings_before_migration(path)?;
     }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".tmp");
-    let temp = PathBuf::from(temp);
-    {
-        let mut file = fs::File::create(&temp)?;
-        file.write_all(json.as_bytes())?;
-        file.sync_all()?;
-    }
-    if path.exists() {
-        fs::copy(path, backup_path(path))?;
-    }
-    fs::rename(&temp, path)
+    crate::persistence::write_atomic_with_backup(path, Ok(json.into_bytes()))
 }
 
 #[cfg(test)]

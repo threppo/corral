@@ -97,6 +97,8 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::path::Path;
 
+use crate::shell_items_pidl::{bind_items, parent_pidl, parse};
+
 use windows::Win32::Foundation::{BOOL, GlobalFree,
     DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, E_FAIL, E_INVALIDARG, HGLOBAL, HWND, POINT,
     POINTL, S_OK, SIZE,
@@ -117,9 +119,9 @@ use windows::Win32::System::SystemServices::{MK_CONTROL, MK_LBUTTON, MK_RBUTTON,
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VIRTUAL_KEY, VK_LBUTTON, VK_LCONTROL, VK_LMENU, VK_RBUTTON, VK_RCONTROL, VK_RMENU};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    BHID_SFObject, CLSID_DragDropHelper, DragQueryFileW, FOLDERID_Desktop, HDROP, ILClone, ILCombine, ILFindLastID, ILFree,
-    ILIsEqual, ILRemoveLastID, IDragSourceHelper, IDragSourceHelper2, IDropTargetHelper, IShellFolder, IShellItem, KF_FLAG_DEFAULT, SHBindToParent,
-    SHChangeNotify, SHCreateItemFromParsingName, SHGetNewLinkInfoW, IShellLinkW, ShellLink, SHCNE_CREATE, SHCNF_PATHW, SHDRAGIMAGE, SHGetDesktopFolder, SHGetKnownFolderPath, SHGetNameFromIDList, SHParseDisplayName,
+    BHID_SFObject, CLSID_DragDropHelper, DragQueryFileW, FOLDERID_Desktop, HDROP, ILCombine, ILFindLastID, ILFree,
+    ILIsEqual, IDragSourceHelper, IDragSourceHelper2, IDropTargetHelper, IShellFolder, IShellItem, KF_FLAG_DEFAULT, SHBindToParent,
+    SHChangeNotify, SHCreateItemFromParsingName, SHGetNewLinkInfoW, IShellLinkW, ShellLink, SHCNE_CREATE, SHCNF_PATHW, SHDRAGIMAGE, SHGetDesktopFolder, SHGetKnownFolderPath, SHGetNameFromIDList,
     SIGDN_DESKTOPABSOLUTEPARSING, SIGDN_FILESYSPATH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, IDC_ARROW, LoadCursorW, SM_SWAPBUTTON, SetCursor};
@@ -383,74 +385,13 @@ pub fn read_source_names(data: &IDataObject) -> Vec<String> {
     }
 }
 
-/// Owns an absolute PIDL allocated by the Shell (`CoTaskMemFree`).
-struct Pidl(*mut ITEMIDLIST);
-
-impl Drop for Pidl {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { CoTaskMemFree(Some(self.0 as *const c_void)) };
-        }
-    }
-}
-
-/// Owns a PIDL cloned with `ILClone` (freed with `ILFree`).
-struct ClonedPidl(*mut ITEMIDLIST);
-
-impl Drop for ClonedPidl {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            unsafe { ILFree(Some(self.0 as *const ITEMIDLIST)) };
-        }
-    }
-}
-
-fn parse(name: &str) -> Result<Pidl> {
-    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
-    unsafe { SHParseDisplayName(&HSTRING::from(name), None::<&IBindCtx>, &mut pidl, 0, None)? };
-    if pidl.is_null() {
-        return Err(err("SHParseDisplayName returned no item"));
-    }
-    Ok(Pidl(pidl))
-}
-
-fn parent_pidl(pidl: &Pidl) -> Result<ClonedPidl> {
-    let clone = unsafe { ILClone(pidl.0 as *const ITEMIDLIST) };
-    if clone.is_null() {
-        return Err(err("ILClone failed"));
-    }
-    let clone = ClonedPidl(clone);
-    unsafe {
-        let _ = ILRemoveLastID(Some(clone.0));
-    }
-    Ok(clone)
-}
-
 /// The Shell data object (`CFSTR_SHELLIDLIST`, `CF_HDROP`, ...) for items that share one parent
 /// folder, exactly what Explorer drags. `Err` for an empty list, an unparsable name or items from
 /// different parents (user and public desktop items resolve to different parents).
 pub fn data_object_for(owner: HWND, parsing_names: &[String]) -> Result<IDataObject> {
-    if parsing_names.is_empty() {
-        return Err(invalid("no items given to drag"));
-    }
-    let pidls = parsing_names.iter().map(|n| parse(n)).collect::<Result<Vec<_>>>()?;
-    let first_parent = parent_pidl(&pidls[0])?;
-    for (i, pidl) in pidls.iter().enumerate().skip(1) {
-        let parent = parent_pidl(pidl)?;
-        if !unsafe { ILIsEqual(first_parent.0 as *const ITEMIDLIST, parent.0 as *const ITEMIDLIST) }.as_bool() {
-            return Err(invalid(&format!(
-                "items do not share a parent folder (\"{}\" differs from \"{}\"); one data object is not possible",
-                parsing_names[i], parsing_names[0]
-            )));
-        }
-    }
-    let folder: IShellFolder = unsafe { SHBindToParent::<IShellFolder>(pidls[0].0 as *const ITEMIDLIST, None)? };
-    let children: Vec<*const ITEMIDLIST> =
-        pidls.iter().map(|p| unsafe { ILFindLastID(p.0 as *const ITEMIDLIST) } as *const ITEMIDLIST).collect();
-    if children.iter().any(|c| c.is_null()) {
-        return Err(err("could not determine child item identifiers"));
-    }
-    unsafe { folder.GetUIObjectOf(owner, &children, None) }
+    let items = bind_items(parsing_names, "no items given to drag", "one data object is not possible")?;
+    let children = items.children()?;
+    unsafe { items.folder.GetUIObjectOf(owner, &children, None) }
 }
 
 // ---------------------------------------------------------------------------------------------
