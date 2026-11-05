@@ -33,6 +33,8 @@ Run by Claude Code on the code of v0.2.0-alpha, with a debug build unless noted.
 | The whole new-user path on the real desktop, into a throwaway layout, with the owner's OK | 31 of 31 items sorted, the preview closed, Corral started on the desktop, the same files and names afterwards |
 | Independent reviews of both changes | two rounds; the defects found were fixed before merging |
 
+| v0.2.1-alpha: a start with no arguments beside a running desktop Corral | Settings opened, no preview, nothing written; a preview on its own layout still opened |
+
 The lead agent read windows and files for these results. It took no pictures of the real desktop.
 Not tested: several monitors on this path, and a machine other than the development PC.
 

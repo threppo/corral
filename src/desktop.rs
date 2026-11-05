@@ -16,8 +16,8 @@ use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, H
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::{SHELLSTATEA, SHGetSetSettings, SSF_HIDEICONS};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-    ShowWindow, SW_HIDE, SW_SHOWNA,
+    EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
+    SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOWNA,
 };
 use windows::core::{PCWSTR, w};
 
@@ -143,6 +143,24 @@ pub enum LockOutcome {
 /// the Settings processes do not keep it after Corral ends.
 pub fn take_desktop_lock() -> LockOutcome {
     take_lock(w!("Local\\CorralDesktop"))
+}
+
+/// Held by a preview on the real layout, so a second one brings the first forward instead.
+pub fn take_preview_lock() -> LockOutcome {
+    take_lock(w!("Local\\CorralPreview"))
+}
+
+/// The user just started us, so Windows lets this process hand over the foreground.
+pub fn raise_preview() {
+    let Some(preview) = unsafe { FindWindowW(w!("CorralPreview"), PCWSTR::null()) }.ok().filter(|h| !h.is_invalid()) else {
+        return;
+    };
+    unsafe {
+        if IsIconic(preview).as_bool() {
+            let _ = ShowWindow(preview, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(preview);
+    }
 }
 
 fn take_lock(name: PCWSTR) -> LockOutcome {

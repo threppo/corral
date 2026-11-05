@@ -83,14 +83,7 @@ fn main() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(default_layout_path);
             let page = args.iter().position(|a| a == "--page").and_then(|i| args.get(i + 1)).and_then(|n| settings_ui::Page::from_name(n));
-            // Started again while one is open (two quick menu clicks, a shortcut): that one comes forward.
-            // `--page` and a colour target ask for a particular view, so they keep their own window.
-            if page.is_none() && std::env::var_os("CORRAL_SETTINGS_COLOR_TARGET").is_none()
-                && settings::style_request::send_raise(&layout) == settings::style_request::LiveOutcome::Applied {
-                std::process::exit(0);
-            }
-            tint::use_for_settings_only();
-            std::process::exit(settings_ui::run_settings_window(&path, &layout, page));
+            open_settings(&path, &layout, page);
         }
         Some("--probe") => probe(),
         Some("--probe-view") => probe_view(),
@@ -101,8 +94,24 @@ fn main() {
         }
         _ => {
             let options = parse_options(&args);
+            // A preview on the real layout beside another Corral: two processes would save one file. Previews on
+            // their own layout files stay free to run.
+            let _preview_lock = if options.mode == app::Mode::Preview && options.layout_path == default_layout_path() {
+                let desktop_running = matches!(desktop::take_desktop_lock(), desktop::LockOutcome::Taken);
+                let preview = desktop::take_preview_lock();
+                match preview_start(desktop_running, matches!(preview, desktop::LockOutcome::Taken)) {
+                    PreviewStart::OpenSettings => open_settings(&options.settings_path, &options.layout_path, None),
+                    PreviewStart::RaisePreview => {
+                        desktop::raise_preview();
+                        std::process::exit(0);
+                    }
+                    PreviewStart::Run => Some(preview),
+                }
+            } else {
+                None
+            };
             // One Corral on a desktop: two would act on one layout and settings file. The lock lives until the
-            // process ends. Only desktop mode takes it, so a preview can run beside the real Corral.
+            // process ends.
             let _desktop_lock = if options.mode == app::Mode::Desktop {
                 match desktop::take_desktop_lock() {
                     desktop::LockOutcome::Held(lock) => Some(lock),
@@ -127,6 +136,57 @@ fn main() {
 
 /// `--desktop` while another Corral runs on this desktop: nothing was touched.
 const EXIT_ALREADY_RUNNING: i32 = 3;
+
+/// The Settings window alone, without desktop hosting.
+fn open_settings(path: &std::path::Path, layout: &std::path::Path, page: Option<settings_ui::Page>) -> ! {
+    // Started again while one is open (two quick menu clicks, a shortcut): that one comes forward.
+    // `--page` and a colour target ask for a particular view, so they keep their own window.
+    if page.is_none() && std::env::var_os("CORRAL_SETTINGS_COLOR_TARGET").is_none()
+        && settings::style_request::send_raise(layout) == settings::style_request::LiveOutcome::Applied {
+        std::process::exit(0);
+    }
+    tint::use_for_settings_only();
+    std::process::exit(settings_ui::run_settings_window(path, layout, page));
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreviewStart {
+    Run,
+    OpenSettings,
+    RaisePreview,
+}
+
+/// A second start on the real layout. If Windows gives no answer about a lock, it counts as free.
+fn preview_start(desktop_running: bool, preview_running: bool) -> PreviewStart {
+    if desktop_running {
+        PreviewStart::OpenSettings
+    } else if preview_running {
+        PreviewStart::RaisePreview
+    } else {
+        PreviewStart::Run
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    #[test]
+    fn a_start_beside_another_corral_never_runs_a_second_preview() {
+        assert_eq!(preview_start(false, false), PreviewStart::Run);
+        assert_eq!(preview_start(true, false), PreviewStart::OpenSettings);
+        assert_eq!(preview_start(false, true), PreviewStart::RaisePreview);
+        assert_eq!(preview_start(true, true), PreviewStart::OpenSettings, "the desktop Corral comes first");
+    }
+
+    #[test]
+    fn only_the_real_layout_counts_as_shared() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_options(&args(&[])).layout_path, default_layout_path());
+        assert_eq!(parse_options(&args(&["--preview"])).layout_path, default_layout_path());
+        assert_ne!(parse_options(&args(&["--layout", "throwaway.json"])).layout_path, default_layout_path());
+    }
+}
 
 /// Read-only diagnostics: desktop host and monitors. Changes nothing.
 fn probe() {

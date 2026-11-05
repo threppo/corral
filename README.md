@@ -3,7 +3,7 @@
 **A desktop icon organizer for Windows, built as a personal project with AI coding agents.**
 
 **Status: alpha.** The features below work and have been tested live on Windows 11, but expect
-rough edges; see [Known issues](#known-issues). Download: [v0.2.0-alpha](https://github.com/threppo/corral/releases/tag/v0.2.0-alpha).
+rough edges; see [Known issues](#known-issues). Download: [v0.2.1-alpha](https://github.com/threppo/corral/releases/tag/v0.2.1-alpha).
 
 ![Demo: drawing and naming a Corral, dragging icons in, browsing a Folder Gate, folding, Settings](assets/screenshots/corral-demo.gif)
 
@@ -122,7 +122,7 @@ environment variable, and otherwise uses `cargo` from your `PATH`.
 
 ## Running
 
-Download `corral.exe` from the [v0.2.0-alpha release](https://github.com/threppo/corral/releases/tag/v0.2.0-alpha)
+Download `corral.exe` from the [v0.2.1-alpha release](https://github.com/threppo/corral/releases/tag/v0.2.1-alpha)
 and run it. There is nothing to install.
 
 1. It opens in a preview window showing your own desktop items, and your real desktop stays as it

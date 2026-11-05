@@ -1,6 +1,6 @@
 [package]
 name = "corral"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 description = "Independent desktop icon organizer for Windows"
 license = "GPL-3.0-or-later"
